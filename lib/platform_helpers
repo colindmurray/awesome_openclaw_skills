@@ -9,8 +9,9 @@
 #   # or from installed location:
 #   source "${OPENCLAW_DIR:-$HOME/.openclaw}/lib/platform_helpers"
 #
-# Detects: Linux, macOS (Darwin), WSL, FreeBSD
+# Detects: Linux (including WSL), macOS (Darwin), FreeBSD
 # Falls back gracefully when info is unavailable.
+# Note: Native Windows is not supported. Use WSL2 (detected as Linux).
 
 # --- Platform detection (runs once at source time) ---
 _PLATFORM=""
@@ -29,9 +30,6 @@ _detect_platform() {
       ;;
     Darwin*)  _PLATFORM="macos" ;;
     FreeBSD*) _PLATFORM="freebsd" ;;
-    CYGWIN*|MINGW*|MSYS*)
-      _PLATFORM="windows"
-      ;;
     *)
       _PLATFORM="unknown"
       ;;
