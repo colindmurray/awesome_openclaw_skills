@@ -141,6 +141,7 @@ TIMEOUT=""             # seconds, empty = no timeout
 WORKDIR="$(pwd)"
 WORKTREE=""
 PROMPT_FILE=""
+PERMISSION_MODE="acceptEdits"  # acceptEdits | bypassPermissions
 
 # --- Parse arguments ---
 while [[ $# -gt 0 ]]; do
@@ -157,6 +158,7 @@ while [[ $# -gt 0 ]]; do
     --workdir)     WORKDIR="$2"; shift 2 ;;
     --worktree)    WORKTREE="$2"; shift 2 ;;
     --prompt-file) PROMPT_FILE="$2"; shift 2 ;;
+    --permission-mode) PERMISSION_MODE="$2"; shift 2 ;;
     --force)       FORCE_LAUNCH=true; shift ;;
     *)
       echo "Unknown flag: $1" >&2
@@ -230,10 +232,21 @@ if [[ "$TYPE" == "coding-agent" ]]; then
         fi
       fi
 
+      # Build permission flags based on --permission-mode
+      claude_perm_flags=""
+      case "$PERMISSION_MODE" in
+        bypassPermissions)
+          claude_perm_flags="--dangerously-skip-permissions"
+          ;;
+        acceptEdits|*)
+          claude_perm_flags="--permission-mode acceptEdits"
+          ;;
+      esac
+
       if [[ "$use_subscription" == true ]]; then
-        EXEC_COMMAND="env -u ANTHROPIC_API_KEY claude -p --dangerously-skip-permissions --output-format stream-json --verbose"
+        EXEC_COMMAND="env -u ANTHROPIC_API_KEY claude -p $claude_perm_flags --output-format stream-json --verbose"
       else
-        EXEC_COMMAND="claude -p --dangerously-skip-permissions --output-format stream-json --verbose"
+        EXEC_COMMAND="claude -p $claude_perm_flags --output-format stream-json --verbose"
       fi
       if [[ -n "$PROMPT_FILE" ]]; then
         EXEC_COMMAND="$EXEC_COMMAND < $(printf '%q' "$PROMPT_FILE")"
@@ -242,7 +255,15 @@ if [[ "$TYPE" == "coding-agent" ]]; then
       fi
       ;;
     gemini)
-      EXEC_COMMAND="gemini -y -p"
+      # Build approval flags based on --permission-mode
+      case "$PERMISSION_MODE" in
+        bypassPermissions)
+          EXEC_COMMAND="gemini -y -p"
+          ;;
+        acceptEdits|*)
+          EXEC_COMMAND="gemini --approval-mode auto_edit -p"
+          ;;
+      esac
       if [[ -n "$PROMPT_FILE" ]]; then
         EXEC_COMMAND="$EXEC_COMMAND < $(printf '%q' "$PROMPT_FILE")"
       else
@@ -250,7 +271,15 @@ if [[ "$TYPE" == "coding-agent" ]]; then
       fi
       ;;
     codex)
-      EXEC_COMMAND="codex -s danger-full-access --dangerously-bypass-approvals-and-sandbox --json exec"
+      # Build sandbox flags based on --permission-mode
+      case "$PERMISSION_MODE" in
+        bypassPermissions)
+          EXEC_COMMAND="codex -s danger-full-access --dangerously-bypass-approvals-and-sandbox --json exec"
+          ;;
+        acceptEdits|*)
+          EXEC_COMMAND="codex --full-auto --json exec"
+          ;;
+      esac
       if [[ -n "$PROMPT_FILE" ]]; then
         EXEC_COMMAND="$EXEC_COMMAND \"\$(cat $(printf '%q' "$PROMPT_FILE"))\""
       else
@@ -268,9 +297,27 @@ fi
 AGENT_FLAGS=""
 if [[ "$TYPE" == "coding-agent" ]]; then
   case "$AGENT" in
-    claude) AGENT_FLAGS="--dangerously-skip-permissions --output-format stream-json" ;;
-    gemini) AGENT_FLAGS="--yolo" ;;
-    codex)  AGENT_FLAGS="--json" ;;
+    claude)
+      if [[ "$PERMISSION_MODE" == "bypassPermissions" ]]; then
+        AGENT_FLAGS="--dangerously-skip-permissions --output-format stream-json"
+      else
+        AGENT_FLAGS="--permission-mode acceptEdits --output-format stream-json"
+      fi
+      ;;
+    gemini)
+      if [[ "$PERMISSION_MODE" == "bypassPermissions" ]]; then
+        AGENT_FLAGS="--yolo"
+      else
+        AGENT_FLAGS="--approval-mode auto_edit"
+      fi
+      ;;
+    codex)
+      if [[ "$PERMISSION_MODE" == "bypassPermissions" ]]; then
+        AGENT_FLAGS="--danger-full-access --json"
+      else
+        AGENT_FLAGS="--full-auto --json"
+      fi
+      ;;
   esac
 fi
 
@@ -292,6 +339,7 @@ jq -n \
   --arg agentFlags "$AGENT_FLAGS" \
   --arg worktree "$WORKTREE" \
   --arg promptFile "$PROMPT_FILE" \
+  --arg permissionMode "$PERMISSION_MODE" \
   '{
     taskId: $taskId,
     pid: null,
@@ -310,7 +358,8 @@ jq -n \
     agent: (if $agent == "" then null else $agent end),
     agentFlags: (if $agentFlags == "" then null else $agentFlags end),
     worktree: (if $worktree == "" then null else $worktree end),
-    promptFile: (if $promptFile == "" then null else $promptFile end)
+    promptFile: (if $promptFile == "" then null else $promptFile end),
+    permissionMode: (if $permissionMode == "" then null else $permissionMode end)
   }' > "$MANIFEST"
 
 # --- Notification helper ---

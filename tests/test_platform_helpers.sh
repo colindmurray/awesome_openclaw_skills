@@ -465,6 +465,80 @@ done
 
 # ============================================================
 echo ""
+echo "=== execute_long_running_task permission-mode flag ==="
+# ============================================================
+
+# Test that the --permission-mode flag is accepted and defaults work correctly.
+# We can't actually run coding agents in CI, but we can test the arg parsing
+# and command construction by sourcing fragments.
+
+ELT_SCRIPT="$REPO_DIR/skills/long-running-task/bin/execute_long_running_task"
+
+# Test 1: Script accepts --permission-mode flag without error
+result="$(bash -n "$ELT_SCRIPT" 2>&1)"
+exit_code=$?
+if [[ $exit_code -eq 0 ]]; then
+  pass "execute_long_running_task syntax check passes"
+else
+  fail "execute_long_running_task has syntax errors: $result"
+fi
+
+# Test 2: Default PERMISSION_MODE is acceptEdits
+result="$(grep 'PERMISSION_MODE="acceptEdits"' "$ELT_SCRIPT")"
+if [[ -n "$result" ]]; then
+  pass "default PERMISSION_MODE is acceptEdits"
+else
+  fail "default PERMISSION_MODE not set to acceptEdits"
+fi
+
+# Test 3: --permission-mode is in the arg parser
+result="$(grep '\-\-permission-mode)' "$ELT_SCRIPT")"
+if [[ -n "$result" ]]; then
+  pass "--permission-mode flag in arg parser"
+else
+  fail "--permission-mode flag not found in arg parser"
+fi
+
+# Test 4: permissionMode is recorded in the manifest
+result="$(grep 'permissionMode' "$ELT_SCRIPT")"
+if [[ -n "$result" ]]; then
+  pass "permissionMode included in task manifest"
+else
+  fail "permissionMode not found in manifest builder"
+fi
+
+# Test 5: acceptEdits maps to --permission-mode acceptEdits for Claude
+result="$(grep -A2 'acceptEdits|\*)' "$ELT_SCRIPT" | head -3)"
+if echo "$result" | grep -q 'permission-mode acceptEdits'; then
+  pass "acceptEdits maps to --permission-mode acceptEdits for Claude"
+else
+  fail "acceptEdits does not map to --permission-mode acceptEdits for Claude"
+fi
+
+# Test 6: bypassPermissions maps to --dangerously-skip-permissions for Claude
+result="$(grep -A2 'bypassPermissions)' "$ELT_SCRIPT" | head -3)"
+if echo "$result" | grep -q 'dangerously-skip-permissions'; then
+  pass "bypassPermissions maps to --dangerously-skip-permissions for Claude"
+else
+  fail "bypassPermissions does not map correctly for Claude"
+fi
+
+# Test 7: Gemini uses --approval-mode auto_edit for acceptEdits
+if grep -q 'approval-mode auto_edit' "$ELT_SCRIPT"; then
+  pass "Gemini uses --approval-mode auto_edit for safe mode"
+else
+  fail "Gemini missing --approval-mode auto_edit"
+fi
+
+# Test 8: Codex uses --full-auto for acceptEdits
+if grep -q '\-\-full-auto' "$ELT_SCRIPT"; then
+  pass "Codex uses --full-auto for safe mode"
+else
+  fail "Codex missing --full-auto flag"
+fi
+
+# ============================================================
+echo ""
 echo "=== platform_helpers sources from skill paths ==="
 # ============================================================
 
