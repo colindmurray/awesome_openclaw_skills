@@ -20,6 +20,18 @@ if [[ -s "$HOME/.nvm/nvm.sh" ]]; then
 fi
 export PATH
 
+# --- Load cross-platform helpers ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for _ph in \
+  "${OPENCLAW_DIR:-$HOME/.openclaw}/lib/platform_helpers" \
+  "$SCRIPT_DIR/../../../lib/platform_helpers" \
+; do
+  if [[ -f "$_ph" ]]; then
+    source "$_ph"
+    break
+  fi
+done
+
 TASKS_DIR="$HOME/.openclaw/tasks"
 ACTIVE_DIR="$TASKS_DIR/active"
 COMPLETED_DIR="$TASKS_DIR/completed"
@@ -134,7 +146,7 @@ for manifest in "$ACTIVE_DIR"/*.json; do
   fi
 
   # Check output file freshness
-  mtime="$(stat -c%Y "$output_file" 2>/dev/null || echo 0)"
+  mtime="$(get_file_mtime_epoch "$output_file")"
   now_epoch="$(date +%s)"
   age=$((now_epoch - mtime))
 
@@ -399,7 +411,7 @@ cleanup_worktrees() {
         continue
       fi
 
-      wt_ended_epoch="$(date -d "$wt_ended" +%s 2>/dev/null || echo 0)"
+      wt_ended_epoch="$(parse_date_to_epoch "$wt_ended" 2>/dev/null || echo 0)"
       wt_now_epoch="$(date +%s)"
       wt_age=$((wt_now_epoch - wt_ended_epoch))
 

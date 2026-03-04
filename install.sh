@@ -164,14 +164,21 @@ install_lib() {
   local dest="$TARGET_DIR/lib"
 
   if [[ "$DRY_RUN" == true ]]; then
-    echo -e "  ${BLUE}[dry-run]${NC} Would install: lib/resolve_github_account → $dest/"
+    echo -e "  ${BLUE}[dry-run]${NC} Would install: lib/ → $dest/"
     return 0
   fi
 
   mkdir -p "$dest"
-  cp "$SCRIPT_DIR/lib/resolve_github_account" "$dest/resolve_github_account"
-  chmod +x "$dest/resolve_github_account"
-  echo -e "  ${GREEN}Installed${NC} lib/resolve_github_account → $dest/"
+
+  # Install all library files
+  for lib_file in "$SCRIPT_DIR/lib/"*; do
+    [[ -f "$lib_file" ]] || continue
+    local lib_name
+    lib_name="$(basename "$lib_file")"
+    cp "$lib_file" "$dest/$lib_name"
+    chmod +x "$dest/$lib_name"
+    echo -e "  ${GREEN}Installed${NC} lib/$lib_name → $dest/"
+  done
 }
 
 install_hook() {
@@ -245,7 +252,7 @@ prompt_secrets_setup() {
   echo ""
   read -rp "Create secrets directory? [Y/n] " response
 
-  if [[ "${response,,}" != "n" ]]; then
+  if [[ "$(echo "$response" | tr '[:upper:]' '[:lower:]')" != "n" ]]; then
     mkdir -p "$secrets_dir"
     echo -e "  ${GREEN}Created${NC} $secrets_dir/"
     echo -e "  Add your keys as files: e.g., echo 'your-key' > $secrets_dir/GEMINI_API_KEY"
@@ -284,7 +291,7 @@ prompt_coding_agent_setup() {
   local primary=""
   while [[ -z "$primary" ]]; do
     read -rp "  Primary coding agent [claude/codex/gemini/opencode/pi]: " primary
-    primary="${primary,,}"  # lowercase
+    primary="$(echo "$primary" | tr '[:upper:]' '[:lower:]')"
     case "$primary" in
       claude|codex|gemini|opencode|pi) ;;
       *) echo -e "  ${RED}Invalid agent.${NC} Choose: claude, codex, gemini, opencode, pi"; primary="" ;;
@@ -294,7 +301,7 @@ prompt_coding_agent_setup() {
   # --- Primary billing ---
   local primary_billing="api_key"
   read -rp "  Billing for $primary — api_key or subscription? [api_key]: " primary_billing_input
-  primary_billing_input="${primary_billing_input,,}"
+  primary_billing_input="$(echo "$primary_billing_input" | tr '[:upper:]' '[:lower:]')"
   case "$primary_billing_input" in
     subscription) primary_billing="subscription" ;;
     *) primary_billing="api_key" ;;
@@ -304,7 +311,7 @@ prompt_coding_agent_setup() {
   local backup=""
   local backup_billing="api_key"
   read -rp "  Backup agent (or press Enter to skip): " backup
-  backup="${backup,,}"
+  backup="$(echo "$backup" | tr '[:upper:]' '[:lower:]')"
 
   if [[ -n "$backup" ]]; then
     case "$backup" in
@@ -314,7 +321,7 @@ prompt_coding_agent_setup() {
           backup=""
         else
           read -rp "  Billing for $backup — api_key or subscription? [api_key]: " backup_billing_input
-          backup_billing_input="${backup_billing_input,,}"
+          backup_billing_input="$(echo "$backup_billing_input" | tr '[:upper:]' '[:lower:]')"
           case "$backup_billing_input" in
             subscription) backup_billing="subscription" ;;
             *) backup_billing="api_key" ;;
@@ -335,7 +342,7 @@ prompt_coding_agent_setup() {
   local third_billing="api_key"
   if [[ -n "$backup" ]]; then
     read -rp "  Third-choice agent (or press Enter to skip): " third
-    third="${third,,}"
+    third="$(echo "$third" | tr '[:upper:]' '[:lower:]')"
 
     if [[ -n "$third" ]]; then
       case "$third" in
@@ -345,7 +352,7 @@ prompt_coding_agent_setup() {
             third=""
           else
             read -rp "  Billing for $third — api_key or subscription? [api_key]: " third_billing_input
-            third_billing_input="${third_billing_input,,}"
+            third_billing_input="$(echo "$third_billing_input" | tr '[:upper:]' '[:lower:]')"
             case "$third_billing_input" in
               subscription) third_billing="subscription" ;;
               *) third_billing="api_key" ;;

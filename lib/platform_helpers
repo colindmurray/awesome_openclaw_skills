@@ -1,0 +1,321 @@
+#!/usr/bin/env bash
+# platform_helpers — cross-platform abstraction layer for awesome_openclaw_skills
+#
+# Source this file in any bin script to get portable wrappers for
+# system-specific operations (memory, process info, file stats, dates).
+#
+# Usage:
+#   source "$(dirname "${BASH_SOURCE[0]}")/../../../lib/platform_helpers"
+#   # or from installed location:
+#   source "${OPENCLAW_DIR:-$HOME/.openclaw}/lib/platform_helpers"
+#
+# Detects: Linux, macOS (Darwin), WSL, FreeBSD
+# Falls back gracefully when info is unavailable.
+
+# --- Platform detection (runs once at source time) ---
+_PLATFORM=""
+_IS_WSL=false
+
+_detect_platform() {
+  local uname_s
+  uname_s="$(uname -s 2>/dev/null || echo "Unknown")"
+  case "$uname_s" in
+    Linux*)
+      _PLATFORM="linux"
+      # Detect WSL
+      if grep -qi microsoft /proc/version 2>/dev/null; then
+        _IS_WSL=true
+      fi
+      ;;
+    Darwin*)  _PLATFORM="macos" ;;
+    FreeBSD*) _PLATFORM="freebsd" ;;
+    CYGWIN*|MINGW*|MSYS*)
+      _PLATFORM="windows"
+      ;;
+    *)
+      _PLATFORM="unknown"
+      ;;
+  esac
+}
+_detect_platform
+
+# --- Memory functions ---
+
+# Returns available memory in MB (integer). Prints "0" if unavailable.
+get_available_memory_mb() {
+  case "$_PLATFORM" in
+    linux)
+      if [[ -f /proc/meminfo ]]; then
+        local kb
+        kb="$(grep '^MemAvailable:' /proc/meminfo | awk '{print $2}')"
+        if [[ -n "$kb" ]]; then
+          echo $(( kb / 1024 ))
+          return
+        fi
+      fi
+      ;;
+    macos)
+      # vm_stat gives pages; page size is typically 4096 (16384 on Apple Silicon)
+      local page_size free_pages inactive_pages speculative_pages
+      page_size="$(sysctl -n hw.pagesize 2>/dev/null || echo 4096)"
+      # "Pages free" + "Pages inactive" + "Pages speculative" ≈ available
+      free_pages="$(vm_stat 2>/dev/null | awk '/Pages free:/ {gsub(/\./,"",$3); print $3}')"
+      inactive_pages="$(vm_stat 2>/dev/null | awk '/Pages inactive:/ {gsub(/\./,"",$3); print $3}')"
+      speculative_pages="$(vm_stat 2>/dev/null | awk '/Pages speculative:/ {gsub(/\./,"",$3); print $3}')"
+      free_pages="${free_pages:-0}"
+      inactive_pages="${inactive_pages:-0}"
+      speculative_pages="${speculative_pages:-0}"
+      local avail_bytes=$(( (free_pages + inactive_pages + speculative_pages) * page_size ))
+      echo $(( avail_bytes / 1024 / 1024 ))
+      return
+      ;;
+    freebsd)
+      local kb
+      kb="$(sysctl -n vm.stats.vm.v_free_count 2>/dev/null || echo 0)"
+      local page_size
+      page_size="$(sysctl -n hw.pagesize 2>/dev/null || echo 4096)"
+      echo $(( kb * page_size / 1024 / 1024 ))
+      return
+      ;;
+  esac
+  echo "0"
+}
+
+# Returns total memory in MB (integer). Prints "0" if unavailable.
+get_total_memory_mb() {
+  case "$_PLATFORM" in
+    linux)
+      if [[ -f /proc/meminfo ]]; then
+        local kb
+        kb="$(grep '^MemTotal:' /proc/meminfo | awk '{print $2}')"
+        if [[ -n "$kb" ]]; then
+          echo $(( kb / 1024 ))
+          return
+        fi
+      fi
+      ;;
+    macos)
+      local bytes
+      bytes="$(sysctl -n hw.memsize 2>/dev/null || echo 0)"
+      echo $(( bytes / 1024 / 1024 ))
+      return
+      ;;
+    freebsd)
+      local bytes
+      bytes="$(sysctl -n hw.physmem 2>/dev/null || echo 0)"
+      echo $(( bytes / 1024 / 1024 ))
+      return
+      ;;
+  esac
+  echo "0"
+}
+
+# Returns memory usage percentage (0-100). Prints "-1" if unavailable.
+get_memory_usage_pct() {
+  local avail total
+  avail="$(get_available_memory_mb)"
+  total="$(get_total_memory_mb)"
+  if [[ "$total" -gt 0 && "$avail" -ge 0 ]]; then
+    echo $(( (total - avail) * 100 / total ))
+  else
+    echo "-1"
+  fi
+}
+
+# --- Process functions ---
+
+# Returns RSS of a PID in KB. Prints "0" if unavailable or process doesn't exist.
+get_pid_rss_kb() {
+  local pid="$1"
+  case "$_PLATFORM" in
+    linux)
+      if [[ -f "/proc/$pid/status" ]]; then
+        local rss
+        rss="$(grep '^VmRSS:' "/proc/$pid/status" 2>/dev/null | awk '{print $2}')"
+        echo "${rss:-0}"
+        return
+      fi
+      ;;
+  esac
+  # Fallback: ps works on Linux, macOS, FreeBSD
+  local rss
+  rss="$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ')"
+  echo "${rss:-0}"
+}
+
+# --- File stat functions ---
+
+# Returns file modification time as epoch seconds. Prints "0" on error.
+get_file_mtime_epoch() {
+  local filepath="$1"
+  case "$_PLATFORM" in
+    linux)
+      stat -c%Y "$filepath" 2>/dev/null || echo "0"
+      ;;
+    macos|freebsd)
+      stat -f%m "$filepath" 2>/dev/null || echo "0"
+      ;;
+    *)
+      # Fallback: try GNU stat then BSD stat
+      stat -c%Y "$filepath" 2>/dev/null || stat -f%m "$filepath" 2>/dev/null || echo "0"
+      ;;
+  esac
+}
+
+# Returns file size in bytes. Prints "0" on error.
+get_file_size_bytes() {
+  local filepath="$1"
+  case "$_PLATFORM" in
+    linux)
+      stat -c%s "$filepath" 2>/dev/null || echo "0"
+      ;;
+    macos|freebsd)
+      stat -f%z "$filepath" 2>/dev/null || echo "0"
+      ;;
+    *)
+      stat -c%s "$filepath" 2>/dev/null || stat -f%z "$filepath" 2>/dev/null || echo "0"
+      ;;
+  esac
+}
+
+# --- Date functions ---
+
+# Parses an ISO 8601 date string to epoch seconds. Prints "0" on error.
+# Supports: "2026-03-04T15:00:00Z"
+parse_date_to_epoch() {
+  local datestr="$1"
+  case "$_PLATFORM" in
+    linux)
+      date -d "$datestr" +%s 2>/dev/null || echo "0"
+      ;;
+    macos|freebsd)
+      # BSD date: try multiple formats
+      date -j -f "%Y-%m-%dT%H:%M:%SZ" "$datestr" +%s 2>/dev/null \
+        || date -j -f "%Y-%m-%dT%H:%M:%S" "$datestr" +%s 2>/dev/null \
+        || echo "0"
+      ;;
+    *)
+      date -d "$datestr" +%s 2>/dev/null \
+        || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$datestr" +%s 2>/dev/null \
+        || echo "0"
+      ;;
+  esac
+}
+
+# --- Encoding functions ---
+
+# Base64 decode from stdin to stdout
+base64_decode() {
+  case "$_PLATFORM" in
+    macos)
+      base64 -D
+      ;;
+    *)
+      base64 -d
+      ;;
+  esac
+}
+
+# Base64 encode a file to stdout (no line wrapping)
+base64_encode_file() {
+  local filepath="$1"
+  case "$_PLATFORM" in
+    macos)
+      base64 -i "$filepath"
+      ;;
+    *)
+      base64 -w 0 "$filepath"
+      ;;
+  esac
+}
+
+# --- Human-readable formatting ---
+
+# Format bytes as human-readable (e.g., "1.2M", "500K"). Fallback for no numfmt.
+format_bytes_human() {
+  local bytes="$1"
+  if command -v numfmt &>/dev/null; then
+    numfmt --to=iec "$bytes" 2>/dev/null || echo "${bytes}B"
+  elif [[ "$bytes" -ge 1073741824 ]]; then
+    echo "$(( bytes / 1073741824 ))G"
+  elif [[ "$bytes" -ge 1048576 ]]; then
+    echo "$(( bytes / 1048576 ))M"
+  elif [[ "$bytes" -ge 1024 ]]; then
+    echo "$(( bytes / 1024 ))K"
+  else
+    echo "${bytes}B"
+  fi
+}
+
+# --- OOM detection ---
+
+# Check system logs for recent OOM kill messages. Returns 0 if found, 1 if not.
+check_oom_in_logs() {
+  case "$_PLATFORM" in
+    linux)
+      # Try journalctl first (works without root), then dmesg (may need root)
+      if journalctl --user --no-pager -n 20 --since "-5min" 2>/dev/null | grep -qi "oom\|out of memory\|killed process" 2>/dev/null; then
+        return 0
+      fi
+      if dmesg 2>/dev/null | tail -50 | grep -qi "oom.*kill\|out of memory" 2>/dev/null; then
+        return 0
+      fi
+      ;;
+    macos)
+      # macOS doesn't have a kernel OOM killer like Linux.
+      # Check system log for jetsam events (macOS memory pressure killer)
+      if log show --predicate 'eventMessage contains "jetsam"' --last 5m --style compact 2>/dev/null | grep -qi "jetsam" 2>/dev/null; then
+        return 0
+      fi
+      ;;
+  esac
+  return 1
+}
+
+# Determine likely cause of process death. Prints a human-readable string.
+# Args: (none — checks current system state)
+determine_death_cause() {
+  local mem_snapshot=""
+
+  local avail total usage
+  avail="$(get_available_memory_mb)"
+  total="$(get_total_memory_mb)"
+  if [[ "$total" -gt 0 ]]; then
+    mem_snapshot="${avail}MB free of ${total}MB"
+    usage=$(( (total - avail) * 100 / total ))
+    if [[ "$usage" -gt 90 ]]; then
+      echo "Likely OOM kill (memory at ${usage}% when detected, ${mem_snapshot})"
+      return
+    fi
+  fi
+
+  if check_oom_in_logs; then
+    echo "Likely OOM kill (found in system logs${mem_snapshot:+, $mem_snapshot})"
+    return
+  fi
+
+  echo "Process died unexpectedly (SIGKILL, crash, or OOM${mem_snapshot:+ — $mem_snapshot at detection})"
+}
+
+# --- Lowercase helper (bash 3.2 compatible) ---
+
+# Convert string to lowercase. Works on bash 3.2+ (macOS default bash).
+to_lowercase() {
+  if [[ "${BASH_VERSINFO[0]}" -ge 4 ]]; then
+    echo "${1,,}"
+  else
+    echo "$1" | tr '[:upper:]' '[:lower:]'
+  fi
+}
+
+# --- Platform info ---
+
+# Returns the detected platform name
+get_platform() {
+  echo "$_PLATFORM"
+}
+
+# Returns true (0) if running on WSL
+is_wsl() {
+  [[ "$_IS_WSL" == true ]]
+}

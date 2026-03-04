@@ -25,6 +25,20 @@ export PATH
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# --- Load cross-platform helpers ---
+for _ph in \
+  "${OPENCLAW_DIR:-$HOME/.openclaw}/lib/platform_helpers" \
+  "$SCRIPT_DIR/../../../lib/platform_helpers" \
+; do
+  if [[ -f "$_ph" ]]; then
+    source "$_ph"
+    break
+  fi
+done
+if ! declare -f get_available_memory_mb &>/dev/null; then
+  echo "Warning: platform_helpers library not found — memory checks disabled" >&2
+fi
+
 _set_github_identity() {
   # Skip if GH_TOKEN already set (e.g., by caller)
   [[ -n "${GH_TOKEN:-}" ]] && return 0
@@ -52,6 +66,56 @@ _set_github_identity() {
 
   source "$lib_path"
   resolve_and_set_identity_from_remote "$WORKDIR"
+}
+
+# --- Memory safety gate ---
+# Checks available memory before launching coding agents.
+# Configurable via OPENCLAW_MIN_MEMORY_MB (default: 1536 = 1.5GB).
+# Bypassed with --force flag or for non-coding-agent tasks.
+FORCE_LAUNCH=false
+MIN_MEMORY_MB="${OPENCLAW_MIN_MEMORY_MB:-1536}"
+
+_check_memory_available() {
+  # Requires platform_helpers to be loaded
+  if ! declare -f get_available_memory_mb &>/dev/null; then
+    return 0  # can't check, allow
+  fi
+
+  local mem_avail_mb
+  mem_avail_mb="$(get_available_memory_mb)"
+  [[ "$mem_avail_mb" -eq 0 ]] && return 0  # couldn't read, allow
+
+  if [[ "$mem_avail_mb" -lt "$MIN_MEMORY_MB" ]]; then
+    local mem_total_mb
+    mem_total_mb="$(get_total_memory_mb)"
+
+    # Count active coding agents
+    local active_agents=0
+    for _m in "$ACTIVE_DIR"/*.json; do
+      [[ -f "$_m" ]] || continue
+      local _t _p
+      _t="$(jq -r '.type // empty' "$_m" 2>/dev/null)" || continue
+      _p="$(jq -r '.pid // empty' "$_m" 2>/dev/null)"
+      if [[ "$_t" == "coding-agent" && -n "$_p" && "$_p" != "null" ]]; then
+        kill -0 "$_p" 2>/dev/null && active_agents=$((active_agents + 1))
+      fi
+    done
+
+    echo "Error: insufficient memory to launch coding agent." >&2
+    echo "  Available: ${mem_avail_mb}MB (minimum: ${MIN_MEMORY_MB}MB)" >&2
+    echo "  System:    ${mem_avail_mb}MB free of ${mem_total_mb}MB total" >&2
+    echo "  Active coding agents: ${active_agents}" >&2
+    echo "" >&2
+    if [[ "$active_agents" -gt 0 ]]; then
+      echo "  Suggestion: wait for running agents to finish, or kill one with:" >&2
+      echo "    check_task --all   # find the task ID" >&2
+      echo "    kill <PID>         # terminate the agent" >&2
+    fi
+    echo "  Override:  re-run with --force to bypass this check" >&2
+    echo "  Configure: export OPENCLAW_MIN_MEMORY_MB=<MB> to adjust threshold" >&2
+    return 1
+  fi
+  return 0
 }
 
 TASKS_DIR="$HOME/.openclaw/tasks"
@@ -93,6 +157,7 @@ while [[ $# -gt 0 ]]; do
     --workdir)     WORKDIR="$2"; shift 2 ;;
     --worktree)    WORKTREE="$2"; shift 2 ;;
     --prompt-file) PROMPT_FILE="$2"; shift 2 ;;
+    --force)       FORCE_LAUNCH=true; shift ;;
     *)
       echo "Unknown flag: $1" >&2
       exit 1
@@ -113,6 +178,13 @@ fi
 
 # --- Set project-scoped GitHub identity based on workdir ---
 _set_github_identity
+
+# --- Pre-launch memory gate (coding agents only) ---
+if [[ "$TYPE" == "coding-agent" && "$FORCE_LAUNCH" != true ]]; then
+  if ! _check_memory_available; then
+    exit 1
+  fi
+fi
 
 # --- Generate task ID ---
 TASK_ID="task-$$-$(date +%s)"
@@ -298,7 +370,7 @@ monitor_pid() {
       # Calculate duration
       local duration_str=""
       local start_epoch end_epoch
-      start_epoch="$(date -d "$started_at" +%s 2>/dev/null || echo 0)"
+      start_epoch="$(parse_date_to_epoch "$started_at" 2>/dev/null || echo 0)"
       end_epoch="$(date +%s)"
       if [[ "$start_epoch" -gt 0 ]]; then
         local dur=$((end_epoch - start_epoch))
@@ -316,11 +388,10 @@ monitor_pid() {
         output_tail="$(tail -10 "$output_file" 2>/dev/null | head -c 600 || true)"
       fi
 
-      # Determine likely cause
-      local likely_cause="Unknown"
-      # Check dmesg for OOM kills (best-effort, may need sudo)
-      if dmesg 2>/dev/null | tail -50 | grep -qi "oom.*kill\|out of memory" 2>/dev/null; then
-        likely_cause="Likely OOM kill (check dmesg)"
+      # Determine likely cause using platform-aware detection
+      local likely_cause
+      if declare -f determine_death_cause &>/dev/null; then
+        likely_cause="$(determine_death_cause)"
       else
         likely_cause="Process died unexpectedly (SIGKILL, crash, or OOM)"
       fi
@@ -391,7 +462,19 @@ finalize_task() {
       '. + {completedAt: $completedAt, exitCode: $exitCode}' \
       "$MANIFEST" > "$COMPLETED_DIR/$TASK_ID.json" 2>/dev/null || true
   else
-    jq --arg failedAt "$now" --argjson exitCode "$exit_code" --arg note "Process exited with code $exit_code" \
+    local fail_note="Process exited with code $exit_code"
+    if [[ $exit_code -eq 137 ]]; then
+      # Exit 137 = killed by SIGKILL (128+9), almost always OOM killer
+      local _mem_info=""
+      if declare -f get_available_memory_mb &>/dev/null; then
+        local _ma _mt
+        _ma="$(get_available_memory_mb)"
+        _mt="$(get_total_memory_mb)"
+        [[ "$_mt" -gt 0 ]] && _mem_info=" (${_ma}MB free of ${_mt}MB at exit)"
+      fi
+      fail_note="SIGKILL (exit 137) — likely OOM kill${_mem_info}"
+    fi
+    jq --arg failedAt "$now" --argjson exitCode "$exit_code" --arg note "$fail_note" \
       '. + {failedAt: $failedAt, exitCode: $exitCode, note: $note}' \
       "$MANIFEST" > "$FAILED_DIR/$TASK_ID.json" 2>/dev/null || true
   fi
@@ -408,8 +491,8 @@ finalize_task() {
   local duration_str=""
   if [[ -n "$STARTED_AT" ]]; then
     local start_epoch end_epoch
-    start_epoch="$(date -d "$STARTED_AT" +%s 2>/dev/null || echo 0)"
-    end_epoch="$(date -d "$now" +%s 2>/dev/null || echo 0)"
+    start_epoch="$(parse_date_to_epoch "$STARTED_AT" 2>/dev/null || echo 0)"
+    end_epoch="$(parse_date_to_epoch "$now" 2>/dev/null || echo 0)"
     if [[ "$start_epoch" -gt 0 && "$end_epoch" -gt 0 ]]; then
       local dur=$((end_epoch - start_epoch))
       local h=$((dur / 3600)) m=$(( (dur % 3600) / 60 ))

@@ -22,6 +22,18 @@
 
 set -euo pipefail
 
+# --- Load cross-platform helpers ---
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for _ph in \
+  "${OPENCLAW_DIR:-$HOME/.openclaw}/lib/platform_helpers" \
+  "$_SCRIPT_DIR/../../../lib/platform_helpers" \
+; do
+  if [[ -f "$_ph" ]]; then
+    source "$_ph"
+    break
+  fi
+done
+
 # --- Defaults ---
 OUTPUT_FILE=""
 PREFERRED_PROVIDER=""
@@ -159,7 +171,7 @@ generate_gemini() {
     # Gemini returns raw PCM at 24kHz, mono, 16-bit — write WAV header via Python
     local tmp_pcm
     tmp_pcm=$(mktemp /tmp/gemini_pcm_XXXXXX.raw)
-    echo "$audio_data" | base64 -d > "$tmp_pcm"
+    echo "$audio_data" | base64_decode > "$tmp_pcm"
 
     if ! python3 - "$tmp_pcm" "$wav_output" << 'PYEOF'
 import sys, struct

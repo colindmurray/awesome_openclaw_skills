@@ -18,6 +18,17 @@ export PATH
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# --- Load cross-platform helpers ---
+for _ph in \
+  "${OPENCLAW_DIR:-$HOME/.openclaw}/lib/platform_helpers" \
+  "$SCRIPT_DIR/../../../lib/platform_helpers" \
+; do
+  if [[ -f "$_ph" ]]; then
+    source "$_ph"
+    break
+  fi
+done
+
 TASKS_DIR="$HOME/.openclaw/tasks"
 ACTIVE_DIR="$TASKS_DIR/active"
 FAILED_DIR="$TASKS_DIR/failed"
@@ -95,7 +106,7 @@ scan_active_tasks() {
       local duration_str="unknown"
       if [[ -n "$started_at" ]]; then
         local start_epoch end_epoch
-        start_epoch="$(date -d "$started_at" +%s 2>/dev/null || echo 0)"
+        start_epoch="$(parse_date_to_epoch "$started_at" 2>/dev/null || echo 0)"
         end_epoch="$(date +%s)"
         if [[ "$start_epoch" -gt 0 ]]; then
           local dur=$((end_epoch - start_epoch))
@@ -114,10 +125,12 @@ scan_active_tasks() {
         output_tail="$(tail -10 "$output_file" 2>/dev/null | head -c 600 || true)"
       fi
 
-      # Determine likely cause
-      local likely_cause="Process died unexpectedly (SIGKILL, crash, or OOM)"
-      if dmesg 2>/dev/null | tail -50 | grep -qi "oom.*kill\|out of memory" 2>/dev/null; then
-        likely_cause="Likely OOM kill (check dmesg)"
+      # Determine likely cause using platform-aware detection
+      local likely_cause
+      if declare -f determine_death_cause &>/dev/null; then
+        likely_cause="$(determine_death_cause)"
+      else
+        likely_cause="Process died unexpectedly (SIGKILL, crash, or OOM)"
       fi
 
       # Move to failed
@@ -175,26 +188,19 @@ ${output_tail}
 
 # --- 2. Check memory pressure ---
 check_memory_pressure() {
-  if [[ ! -f /proc/meminfo ]]; then
+  if ! declare -f get_memory_usage_pct &>/dev/null; then
     return
   fi
 
-  local mem_total mem_avail usage_pct
-  mem_total="$(grep '^MemTotal:' /proc/meminfo | awk '{print $2}')"
-  mem_avail="$(grep '^MemAvailable:' /proc/meminfo | awk '{print $2}')"
-
-  if [[ -z "$mem_total" || -z "$mem_avail" || "$mem_total" -eq 0 ]]; then
-    return
-  fi
-
-  usage_pct=$(( (mem_total - mem_avail) * 100 / mem_total ))
+  local usage_pct
+  usage_pct="$(get_memory_usage_pct)"
+  [[ "$usage_pct" -lt 0 ]] && return
 
   if [[ "$usage_pct" -gt 85 ]]; then
-    local active_count
+    local active_count mem_avail_mb mem_total_mb
     active_count="$(ls -1 "$ACTIVE_DIR"/*.json 2>/dev/null | wc -l || echo 0)"
-
-    local mem_total_mb=$((mem_total / 1024))
-    local mem_avail_mb=$((mem_avail / 1024))
+    mem_avail_mb="$(get_available_memory_mb)"
+    mem_total_mb="$(get_total_memory_mb)"
 
     notify "**Memory pressure warning**
 - **Usage:** ${usage_pct}% (${mem_avail_mb}MB available of ${mem_total_mb}MB)
@@ -227,7 +233,7 @@ check_output_staleness() {
 
     # Check staleness
     local mtime now_epoch age
-    mtime="$(stat -c%Y "$output_file" 2>/dev/null || echo 0)"
+    mtime="$(get_file_mtime_epoch "$output_file")"
     now_epoch="$(date +%s)"
     age=$((now_epoch - mtime))
 
@@ -253,10 +259,49 @@ check_output_staleness() {
   done
 }
 
+# --- 4. Log memory snapshots for active coding agents ---
+log_memory_snapshots() {
+  if ! declare -f get_available_memory_mb &>/dev/null; then
+    return
+  fi
+
+  local mem_avail_mb mem_total_mb
+  mem_avail_mb="$(get_available_memory_mb)"
+  mem_total_mb="$(get_total_memory_mb)"
+  [[ "$mem_total_mb" -eq 0 ]] && return
+
+  for manifest in "$ACTIVE_DIR"/*.json; do
+    [[ -f "$manifest" ]] || continue
+    [[ -s "$manifest" ]] || continue
+
+    local task_id pid task_type output_file
+    task_id="$(jq -r '.taskId // empty' "$manifest" 2>/dev/null)" || continue
+    pid="$(jq -r '.pid // empty' "$manifest" 2>/dev/null)"
+    task_type="$(jq -r '.type // empty' "$manifest" 2>/dev/null)"
+    output_file="$(jq -r '.outputFile // empty' "$manifest" 2>/dev/null)"
+
+    [[ "$task_type" != "coding-agent" ]] && continue
+    [[ -z "$pid" || "$pid" == "null" ]] && continue
+    kill -0 "$pid" 2>/dev/null || continue
+    [[ -z "$output_file" ]] && continue
+
+    # Get task process RSS (cross-platform)
+    local task_rss_kb task_rss_mb="?"
+    task_rss_kb="$(get_pid_rss_kb "$pid")"
+    [[ "$task_rss_kb" -gt 0 ]] && task_rss_mb=$(( task_rss_kb / 1024 ))
+
+    # Append memory snapshot to the task's output log
+    local ts
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "[memory] $ts | system: ${mem_avail_mb}MB free of ${mem_total_mb}MB | task RSS: ${task_rss_mb}MB | pid: $pid" >> "$output_file" 2>/dev/null || true
+  done
+}
+
 # --- Run all checks ---
 scan_active_tasks
 check_memory_pressure
 check_output_staleness
+log_memory_snapshots
 
 # Clean up stale-warned files for tasks no longer active
 for warn_file in "$TASKS_DIR"/.stale-warned-*; do

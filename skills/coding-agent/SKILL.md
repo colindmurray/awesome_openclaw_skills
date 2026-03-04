@@ -77,10 +77,13 @@ No manifest needed — you're blocking and will see the result immediately.
 
 ---
 
-## Memory Constraints
+## Memory Safety
 
-Coding agents use significant RAM (~1-2GB each). Before launching concurrent agents:
-- Check current usage: `check_task --all --json`
+Coding agents use significant RAM (~1-2GB each). The task launcher **automatically blocks** new coding agents when system memory is below 1.5GB, preventing cascading OOM kills.
+
+- Override with `--force` if you're certain there's enough headroom
+- Adjust threshold: `export OPENCLAW_MIN_MEMORY_MB=2048`
+- Check current usage: `check_task --all --json` (shows per-task RSS + system memory)
 - On low-memory systems, run agents sequentially
 
 ---
