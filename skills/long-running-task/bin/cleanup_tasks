@@ -557,7 +557,7 @@ for _dir in "$COMPLETED_DIR" "$FAILED_DIR"; do
     _main_repo="$(dirname "$_main_repo")"
     [[ -z "$_main_repo" || ! -d "$_main_repo" ]] && continue
     # Skip if already checked
-    local _already=false
+    _already=false
     for _checked in "${_cleanup_repos_checked[@]:-}"; do
       [[ "$_checked" == "$_main_repo" ]] && _already=true && break
     done

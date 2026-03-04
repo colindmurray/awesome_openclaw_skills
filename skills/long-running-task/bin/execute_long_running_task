@@ -170,7 +170,7 @@ if [[ "$TYPE" == "coding-agent" ]]; then
       fi
       ;;
     gemini)
-      EXEC_COMMAND="gemini -y"
+      EXEC_COMMAND="gemini -y -p"
       if [[ -n "$PROMPT_FILE" ]]; then
         EXEC_COMMAND="$EXEC_COMMAND < $(printf '%q' "$PROMPT_FILE")"
       else

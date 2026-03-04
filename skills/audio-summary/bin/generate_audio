@@ -108,7 +108,7 @@ fi
 load_api_keys() {
   local secrets_dir="${OPENCLAW_SECRETS_DIR:-$HOME/.openclaw/secrets}"
   for key in OPENAI_API_KEY GEMINI_API_KEY ELEVENLABS_API_KEY; do
-    if [[ -z "${!key}" ]] && [[ -f "$secrets_dir/$key" ]]; then
+    if [[ -z "${!key:-}" ]] && [[ -f "$secrets_dir/$key" ]]; then
       export "$key"="$(cat "$secrets_dir/$key")"
     fi
   done
@@ -309,9 +309,9 @@ fi
 # Output the actual file path (may be .wav if Gemini was used, .mp3 otherwise)
 echo "$RESULT_FILE"
 
-# If --cleanup flag is set, delete the file immediately after output
-# (Useful for one-liner: AUDIO=$(generate_audio "text" --cleanup) && message --media "$AUDIO")
+# If --cleanup flag is set, schedule file deletion after a delay
+# (Gives caller time to read/upload the file before it's removed)
 if [[ "$CLEANUP" == "true" ]]; then
-  # Register cleanup to happen after a short delay (gives caller time to read the path)
-  trap 'rm -f "$RESULT_FILE" 2>/dev/null' EXIT
+  ( sleep 60 && rm -f "$RESULT_FILE" 2>/dev/null ) &
+  disown
 fi

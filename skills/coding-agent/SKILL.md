@@ -47,7 +47,7 @@ Run the agent directly and wait for the response:
 
 ```bash
 claude -p --dangerously-skip-permissions "<PROMPT>"
-gemini -y "<PROMPT>"
+gemini -y -p "<PROMPT>"
 codex -s danger-full-access --dangerously-bypass-approvals-and-sandbox exec "<PROMPT>"
 ```
 
@@ -109,9 +109,9 @@ Coding agents use significant RAM (~1-2GB each). Before launching concurrent age
 
 | Gemini | Description |
 |--------|-------------|
-| `gemini "prompt"` | Standard one-shot |
-| `gemini --approval-mode auto_edit "prompt"` | Auto-approve edits |
-| `gemini -y "prompt"` | Full auto (yolo mode) |
+| `gemini -p "prompt"` | Non-interactive one-shot |
+| `gemini --approval-mode auto_edit -p "prompt"` | Auto-approve edits, headless |
+| `gemini -y -p "prompt"` | Full auto (yolo mode, headless) |
 
 ### Pi Coding Agent
 
