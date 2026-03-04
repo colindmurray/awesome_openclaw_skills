@@ -1,0 +1,19 @@
+{
+  "accounts": {
+    "personal": {
+      "github_username": "myuser",
+      "ssh_host": "github-personal",
+      "ssh_key": "~/.ssh/id_ed25519_personal",
+      "pat_file": "~/.secrets/PERSONAL_GITHUB_PAT",
+      "owners": ["myuser", "my-org"]
+    },
+    "work": {
+      "github_username": "work-user",
+      "ssh_host": "github-work",
+      "ssh_key": "~/.ssh/id_ed25519_work",
+      "pat_file": "~/.secrets/WORK_GITHUB_PAT",
+      "owners": ["work-org", "work-team"]
+    }
+  },
+  "default_account": "personal"
+}

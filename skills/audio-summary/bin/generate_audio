@@ -1,0 +1,311 @@
+#!/bin/bash
+#
+# generate_audio - Generate audio from text using TTS providers
+#
+# Usage:
+#   generate_audio "text to speak" [--output /path/to/file.mp3] [--provider gemini|openai|elevenlabs]
+#
+# Options:
+#   --output, -o    Output file path (default: /tmp/audio-summary-<timestamp>.mp3)
+#   --provider, -p  Specific provider to use (skips preference order)
+#   --list-voices   List available voices for each provider
+#
+# Environment:
+#   GEMINI_API_KEY     - For Gemini TTS (free tier available)
+#   OPENAI_API_KEY     - For OpenAI TTS (high quality, paid)
+#   ELEVENLABS_API_KEY - For ElevenLabs TTS (best quality, paid)
+#
+# Provider Preference Order:
+#   1. Gemini TTS (gemini-2.5-flash-preview-tts, voice: Aoede) - free tier, outputs WAV
+#   2. OpenAI TTS (gpt-4o-mini-tts, voice: nova) - fallback, outputs MP3
+#   3. ElevenLabs (eleven_multilingual_v2) - last resort, outputs MP3
+
+set -euo pipefail
+
+# --- Defaults ---
+OUTPUT_FILE=""
+PREFERRED_PROVIDER=""
+TEXT_INPUT=""
+LIST_VOICES=false
+CLEANUP=false
+RESULT_FILE=""
+
+# --- Parse arguments ---
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output|-o)
+      OUTPUT_FILE="$2"
+      shift 2
+      ;;
+    --provider|-p)
+      PREFERRED_PROVIDER="$2"
+      shift 2
+      ;;
+    --list-voices)
+      LIST_VOICES=true
+      shift
+      ;;
+    --cleanup)
+      CLEANUP=true
+      shift
+      ;;
+    -*)
+      echo "Error: Unknown option $1" >&2
+      exit 1
+      ;;
+    *)
+      TEXT_INPUT="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ "$LIST_VOICES" == "true" ]]; then
+  echo "Available Voices:"
+  echo ""
+  echo "Gemini TTS (gemini-2.5-flash-preview-tts) — outputs WAV at 24kHz:"
+  echo "  - Aoede (default — warm, expressive)"
+  echo "  - Kore (clear, professional)"
+  echo "  - Charon (deep, measured)"
+  echo "  - Zephyr (bright, energetic)"
+  echo "  - Puck (playful, light)"
+  echo "  - Fenrir (strong, resonant)"
+  echo "  - Leda (soft, gentle)"
+  echo "  - Sulafat, Sadaltager, Zubenelgenubi, and 20 more..."
+  echo ""
+  echo "OpenAI TTS (gpt-4o-mini-tts) — outputs MP3:"
+  echo "  - alloy (neutral)"
+  echo "  - ash (confident)"
+  echo "  - ballad (smooth)"
+  echo "  - coral (warm)"
+  echo "  - echo (steady)"
+  echo "  - fable (expressive)"
+  echo "  - onyx (deep)"
+  echo "  - nova (warm, British - recommended)"
+  echo "  - sage (calm)"
+  echo "  - shimmer (soft)"
+  echo "  - verse, marin, cedar"
+  echo ""
+  echo "ElevenLabs:"
+  echo "  - Rachel (default)"
+  echo "  - Adam"
+  echo "  - Antoni"
+  echo "  - See: https://elevenlabs.io/voice-library"
+  exit 0
+fi
+
+if [[ -z "$TEXT_INPUT" ]]; then
+  echo "Usage: generate_audio \"text to speak\" [--output file.mp3] [--provider gemini|openai|elevenlabs]" >&2
+  exit 1
+fi
+
+# --- Generate default output path ---
+if [[ -z "$OUTPUT_FILE" ]]; then
+  OUTPUT_FILE="/tmp/audio-summary-$(date +%s).mp3"
+fi
+
+# --- Load API keys from secrets directory if not in environment ---
+load_api_keys() {
+  local secrets_dir="${OPENCLAW_SECRETS_DIR:-$HOME/.openclaw/secrets}"
+  for key in OPENAI_API_KEY GEMINI_API_KEY ELEVENLABS_API_KEY; do
+    if [[ -z "${!key}" ]] && [[ -f "$secrets_dir/$key" ]]; then
+      export "$key"="$(cat "$secrets_dir/$key")"
+    fi
+  done
+}
+
+load_api_keys
+
+# --- Provider implementations ---
+
+# Gemini TTS — returns raw PCM (24kHz mono 16-bit), wrapped into WAV by Python
+generate_gemini() {
+  local text="$1"
+  local output="$2"
+  local wav_output="${output%.*}.wav"
+
+  if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+    echo "[gemini] API key not available" >&2
+    return 1
+  fi
+
+  echo "[gemini] Generating audio with gemini-2.5-flash-preview-tts (voice: Aoede)..." >&2
+
+  # Build JSON with jq to safely handle special characters in text
+  local json_body
+  json_body=$(jq -n --arg text "Read aloud in a conversational, friendly tone: $text" '{
+    "contents": [{"parts": [{"text": $text}]}],
+    "generationConfig": {
+      "responseModalities": ["AUDIO"],
+      "speechConfig": {
+        "voiceConfig": {
+          "prebuiltVoiceConfig": {
+            "voiceName": "Aoede"
+          }
+        }
+      }
+    }
+  }')
+
+  local response
+  response=$(curl -s "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=$GEMINI_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "$json_body")
+
+  local audio_data
+  audio_data=$(echo "$response" | jq -r '.candidates[0].content.parts[0].inlineData.data // empty' 2>/dev/null)
+
+  if [[ -n "$audio_data" ]]; then
+    # Gemini returns raw PCM at 24kHz, mono, 16-bit — write WAV header via Python
+    local tmp_pcm
+    tmp_pcm=$(mktemp /tmp/gemini_pcm_XXXXXX.raw)
+    echo "$audio_data" | base64 -d > "$tmp_pcm"
+
+    if ! python3 - "$tmp_pcm" "$wav_output" << 'PYEOF'
+import sys, struct
+pcm = open(sys.argv[1], 'rb').read()
+sr, ch, bps = 24000, 1, 16
+with open(sys.argv[2], 'wb') as f:
+    f.write(b'RIFF'); f.write(struct.pack('<I', 36 + len(pcm)))
+    f.write(b'WAVEfmt '); f.write(struct.pack('<IHHIIHH', 16, 1, ch, sr, sr*ch*bps//8, ch*bps//8, bps))
+    f.write(b'data'); f.write(struct.pack('<I', len(pcm))); f.write(pcm)
+PYEOF
+    then
+      rm -f "$tmp_pcm"
+      echo "[gemini] Failed to convert PCM to WAV" >&2
+      return 1
+    fi
+
+    rm -f "$tmp_pcm"
+    RESULT_FILE="$wav_output"
+    echo "[gemini] Audio saved to $wav_output ($(ls -lh "$wav_output" | awk '{print $5}'))" >&2
+    return 0
+  else
+    local error
+    error=$(echo "$response" | jq -r '.error.message // empty' 2>/dev/null)
+    echo "[gemini] Failed: ${error:-unknown error}" >&2
+    echo "[gemini] Response: $response" >&2
+    return 1
+  fi
+}
+
+# OpenAI TTS (gpt-4o-mini-tts — steerable, high quality, supports 50+ languages)
+generate_openai() {
+  local text="$1"
+  local output="$2"
+
+  if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+    echo "[openai] API key not available" >&2
+    return 1
+  fi
+
+  echo "[openai] Generating audio with gpt-4o-mini-tts (voice: nova)..." >&2
+
+  local response
+  response=$(curl -s -w "\n%{http_code}" "https://api.openai.com/v1/audio/speech" \
+    -H "Authorization: Bearer $OPENAI_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "gpt-4o-mini-tts",
+      "input": "'"$text"'",
+      "voice": "nova",
+      "response_format": "mp3"
+    }' --output "$output" 2>&1)
+
+  local http_code
+  http_code=$(echo "$response" | tail -1)
+
+  if [[ "$http_code" == "200" && -f "$output" && -s "$output" ]]; then
+    RESULT_FILE="$output"
+    echo "[openai] Audio saved to $output ($(ls -lh "$output" | awk '{print $5}'))" >&2
+    return 0
+  else
+    echo "[openai] Failed to generate audio (HTTP $http_code)" >&2
+    return 1
+  fi
+}
+
+# ElevenLabs TTS (best quality)
+generate_elevenlabs() {
+  local text="$1"
+  local output="$2"
+
+  if [[ -z "${ELEVENLABS_API_KEY:-}" ]]; then
+    echo "[elevenlabs] API key not available" >&2
+    return 1
+  fi
+
+  echo "[elevenlabs] Generating audio with eleven_multilingual_v2 (voice: Rachel)..." >&2
+
+  # Rachel voice ID: 21m00Tcm4TlvDq8ikWAM
+  local voice_id="21m00Tcm4TlvDq8ikWAM"
+
+  local response
+  response=$(curl -s -w "\n%{http_code}" "https://api.elevenlabs.io/v1/text-to-speech/$voice_id" \
+    -H "xi-api-key: $ELEVENLABS_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "text": "'"$text"'",
+      "model_id": "eleven_multilingual_v2",
+      "voice_settings": {
+        "stability": 0.5,
+        "similarity_boost": 0.75
+      }
+    }' --output "$output" 2>&1)
+
+  local http_code
+  http_code=$(echo "$response" | tail -1)
+
+  if [[ "$http_code" == "200" && -f "$output" && -s "$output" ]]; then
+    RESULT_FILE="$output"
+    echo "[elevenlabs] Audio saved to $output ($(ls -lh "$output" | awk '{print $5}'))" >&2
+    return 0
+  else
+    echo "[elevenlabs] Failed to generate audio (HTTP $http_code)" >&2
+    return 1
+  fi
+}
+
+# --- Main logic ---
+RESULT_FILE="$OUTPUT_FILE"
+
+if [[ -n "$PREFERRED_PROVIDER" ]]; then
+  # Use specific provider
+  case "$PREFERRED_PROVIDER" in
+    gemini)
+      generate_gemini "$TEXT_INPUT" "$OUTPUT_FILE" || exit 1
+      ;;
+    openai)
+      generate_openai "$TEXT_INPUT" "$OUTPUT_FILE" || exit 1
+      ;;
+    elevenlabs)
+      generate_elevenlabs "$TEXT_INPUT" "$OUTPUT_FILE" || exit 1
+      ;;
+    *)
+      echo "Error: Unknown provider '$PREFERRED_PROVIDER'" >&2
+      exit 1
+      ;;
+  esac
+else
+  # Try providers in preference order
+  if generate_gemini "$TEXT_INPUT" "$OUTPUT_FILE"; then
+    : # Success
+  elif generate_openai "$TEXT_INPUT" "$OUTPUT_FILE"; then
+    : # Success
+  elif generate_elevenlabs "$TEXT_INPUT" "$OUTPUT_FILE"; then
+    : # Success
+  else
+    echo "Error: All TTS providers failed" >&2
+    exit 1
+  fi
+fi
+
+# Output the actual file path (may be .wav if Gemini was used, .mp3 otherwise)
+echo "$RESULT_FILE"
+
+# If --cleanup flag is set, delete the file immediately after output
+# (Useful for one-liner: AUDIO=$(generate_audio "text" --cleanup) && message --media "$AUDIO")
+if [[ "$CLEANUP" == "true" ]]; then
+  # Register cleanup to happen after a short delay (gives caller time to read the path)
+  trap 'rm -f "$RESULT_FILE" 2>/dev/null' EXIT
+fi

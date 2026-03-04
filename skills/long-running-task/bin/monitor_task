@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# monitor_task — active task scanner (runs via cron every 5 minutes)
+#
+# Detects dead PIDs faster than the 30-minute heartbeat cleanup.
+# Checks memory pressure. Warns on stale output. Quiet when everything is fine.
+
+# --- Ensure user paths are available ---
+for _d in "$HOME/.local/bin" "$HOME/bin"; do
+  [[ -d "$_d" && ":$PATH:" != *":$_d:"* ]] && PATH="$_d:$PATH"
+done
+if [[ -s "$HOME/.nvm/nvm.sh" ]]; then
+  export NVM_DIR="$HOME/.nvm"
+  source "$NVM_DIR/nvm.sh" 2>/dev/null || true
+fi
+export PATH
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+TASKS_DIR="$HOME/.openclaw/tasks"
+ACTIVE_DIR="$TASKS_DIR/active"
+FAILED_DIR="$TASKS_DIR/failed"
+OUTPUT_DIR="$TASKS_DIR/output"
+
+CHANNEL=""
+TARGET=""
+STALE_THRESHOLD=600  # 10 minutes
+
+# --- Parse arguments ---
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --channel)         CHANNEL="$2"; shift 2 ;;
+    --target)          TARGET="$2"; shift 2 ;;
+    --stale-threshold) STALE_THRESHOLD="$2"; shift 2 ;;
+    *)
+      echo "Unknown flag: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+mkdir -p "$ACTIVE_DIR" "$FAILED_DIR"
+
+ISSUES_FOUND=0
+
+# --- Notification helper ---
+notify() {
+  local msg="$1"
+  local resolved_target
+  resolved_target="$("$SCRIPT_DIR/resolve_channel" "${TARGET:-}" 2>/dev/null || true)"
+
+  if [[ -z "$resolved_target" ]] || ! command -v openclaw &>/dev/null; then
+    echo "[monitor] (no target) $msg"
+    return 0
+  fi
+
+  local channel_flag=""
+  [[ -n "$CHANNEL" ]] && channel_flag="--channel $CHANNEL"
+
+  openclaw message send $channel_flag -t "$resolved_target" -m "$msg" 2>/dev/null || true
+  echo "[monitor] notified: $(echo "$msg" | head -1)"
+}
+
+# --- 1. Scan active tasks for dead PIDs ---
+scan_active_tasks() {
+  for manifest in "$ACTIVE_DIR"/*.json; do
+    [[ -f "$manifest" ]] || continue
+    [[ -s "$manifest" ]] || continue
+
+    local task_id pid summary started_at output_file notify_target
+    task_id="$(jq -r '.taskId // empty' "$manifest" 2>/dev/null)" || continue
+    pid="$(jq -r '.pid // empty' "$manifest" 2>/dev/null)"
+    summary="$(jq -r '.summary // "unknown task"' "$manifest" 2>/dev/null)"
+    started_at="$(jq -r '.startedAt // empty' "$manifest" 2>/dev/null)"
+    output_file="$(jq -r '.outputFile // empty' "$manifest" 2>/dev/null)"
+    notify_target="$(jq -r '.notifyTarget // empty' "$manifest" 2>/dev/null)"
+
+    [[ -z "$task_id" ]] && continue
+    [[ -z "$pid" || "$pid" == "null" ]] && continue
+
+    # Skip if already handled (check failed dir)
+    if [[ -f "$FAILED_DIR/$task_id.json" ]]; then
+      # Already in failed — remove orphaned active manifest
+      rm -f "$manifest"
+      continue
+    fi
+
+    if ! kill -0 "$pid" 2>/dev/null; then
+      # PID is dead — detect and notify
+      local now
+      now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      # Calculate duration
+      local duration_str="unknown"
+      if [[ -n "$started_at" ]]; then
+        local start_epoch end_epoch
+        start_epoch="$(date -d "$started_at" +%s 2>/dev/null || echo 0)"
+        end_epoch="$(date +%s)"
+        if [[ "$start_epoch" -gt 0 ]]; then
+          local dur=$((end_epoch - start_epoch))
+          local h=$((dur / 3600)) m=$(( (dur % 3600) / 60 ))
+          if [[ $h -gt 0 ]]; then
+            duration_str="${h}h ${m}m"
+          else
+            duration_str="${m}m"
+          fi
+        fi
+      fi
+
+      # Get last output
+      local output_tail=""
+      if [[ -n "$output_file" && -f "$output_file" ]]; then
+        output_tail="$(tail -10 "$output_file" 2>/dev/null | head -c 600 || true)"
+      fi
+
+      # Determine likely cause
+      local likely_cause="Process died unexpectedly (SIGKILL, crash, or OOM)"
+      if dmesg 2>/dev/null | tail -50 | grep -qi "oom.*kill\|out of memory" 2>/dev/null; then
+        likely_cause="Likely OOM kill (check dmesg)"
+      fi
+
+      # Move to failed
+      jq --arg failedAt "$now" \
+         --argjson exitCode -9 \
+         --arg note "$likely_cause (detected by monitor_task)" \
+         --argjson monitorDetected true \
+        '. + {failedAt: $failedAt, exitCode: $exitCode, note: $note, monitorDetected: $monitorDetected}' \
+        "$manifest" > "$FAILED_DIR/$task_id.json" 2>/dev/null || true
+      rm -f "$manifest"
+
+      # Kill orphaned monitor process
+      local monitor_pid_val
+      monitor_pid_val="$(jq -r '.monitorPid // empty' "$FAILED_DIR/$task_id.json" 2>/dev/null || true)"
+      if [[ -n "$monitor_pid_val" && "$monitor_pid_val" != "null" ]]; then
+        kill "$monitor_pid_val" 2>/dev/null || true
+      fi
+
+      # Use task-specific notify target if available, fall back to flag
+      local effective_target="${notify_target:-$TARGET}"
+
+      local notify_msg="**Task died unexpectedly** (monitor)
+- **Summary:** ${summary}
+- **Task ID:** ${task_id}
+- **Duration:** ${duration_str}
+- **Likely cause:** ${likely_cause}
+- **Check:** \`check_task --task-id ${task_id}\`"
+
+      if [[ -n "$output_tail" ]]; then
+        notify_msg="${notify_msg}
+- **Last output:**
+\`\`\`
+${output_tail}
+\`\`\`"
+      fi
+
+      # Send notification using task's target if available
+      local resolved_target
+      resolved_target="$("$SCRIPT_DIR/resolve_channel" "${effective_target:-}" 2>/dev/null || true)"
+      if [[ -n "$resolved_target" ]] && command -v openclaw &>/dev/null; then
+        local cf=""
+        [[ -n "$CHANNEL" ]] && cf="--channel $CHANNEL"
+        openclaw message send $cf -t "$resolved_target" -m "$notify_msg" 2>/dev/null || true
+      fi
+
+      # Fire system event to wake AI
+      if command -v openclaw &>/dev/null; then
+        openclaw system event --text "Task died: $summary (id: $task_id). $likely_cause" --mode now 2>/dev/null || true
+      fi
+
+      ISSUES_FOUND=$((ISSUES_FOUND + 1))
+    fi
+  done
+}
+
+# --- 2. Check memory pressure ---
+check_memory_pressure() {
+  if [[ ! -f /proc/meminfo ]]; then
+    return
+  fi
+
+  local mem_total mem_avail usage_pct
+  mem_total="$(grep '^MemTotal:' /proc/meminfo | awk '{print $2}')"
+  mem_avail="$(grep '^MemAvailable:' /proc/meminfo | awk '{print $2}')"
+
+  if [[ -z "$mem_total" || -z "$mem_avail" || "$mem_total" -eq 0 ]]; then
+    return
+  fi
+
+  usage_pct=$(( (mem_total - mem_avail) * 100 / mem_total ))
+
+  if [[ "$usage_pct" -gt 85 ]]; then
+    local active_count
+    active_count="$(ls -1 "$ACTIVE_DIR"/*.json 2>/dev/null | wc -l || echo 0)"
+
+    local mem_total_mb=$((mem_total / 1024))
+    local mem_avail_mb=$((mem_avail / 1024))
+
+    notify "**Memory pressure warning**
+- **Usage:** ${usage_pct}% (${mem_avail_mb}MB available of ${mem_total_mb}MB)
+- **Active tasks:** ${active_count}
+- **Risk:** OOM kills likely if more tasks are launched"
+
+    ISSUES_FOUND=$((ISSUES_FOUND + 1))
+  fi
+}
+
+# --- 3. Check output staleness ---
+check_output_staleness() {
+  for manifest in "$ACTIVE_DIR"/*.json; do
+    [[ -f "$manifest" ]] || continue
+    [[ -s "$manifest" ]] || continue
+
+    local task_id pid summary output_file
+    task_id="$(jq -r '.taskId // empty' "$manifest" 2>/dev/null)" || continue
+    pid="$(jq -r '.pid // empty' "$manifest" 2>/dev/null)"
+    summary="$(jq -r '.summary // "unknown task"' "$manifest" 2>/dev/null)"
+    output_file="$(jq -r '.outputFile // empty' "$manifest" 2>/dev/null)"
+
+    [[ -z "$task_id" ]] && continue
+    [[ -z "$pid" || "$pid" == "null" ]] && continue
+
+    # Only check living processes
+    kill -0 "$pid" 2>/dev/null || continue
+
+    [[ -z "$output_file" || ! -f "$output_file" ]] && continue
+
+    # Check staleness
+    local mtime now_epoch age
+    mtime="$(stat -c%Y "$output_file" 2>/dev/null || echo 0)"
+    now_epoch="$(date +%s)"
+    age=$((now_epoch - mtime))
+
+    if [[ "$age" -gt "$STALE_THRESHOLD" ]]; then
+      # Check if we already warned for this task
+      local warn_file="$TASKS_DIR/.stale-warned-${task_id}"
+      if [[ -f "$warn_file" ]]; then
+        continue  # Already warned, don't spam
+      fi
+
+      local age_min=$((age / 60))
+      notify "**Output stale warning**
+- **Summary:** ${summary}
+- **Task ID:** ${task_id}
+- **No output for:** ${age_min} minutes
+- **PID:** ${pid} (still alive)
+- **Check:** \`check_task --task-id ${task_id}\`"
+
+      # Mark as warned
+      touch "$warn_file"
+      ISSUES_FOUND=$((ISSUES_FOUND + 1))
+    fi
+  done
+}
+
+# --- Run all checks ---
+scan_active_tasks
+check_memory_pressure
+check_output_staleness
+
+# Clean up stale-warned files for tasks no longer active
+for warn_file in "$TASKS_DIR"/.stale-warned-*; do
+  [[ -f "$warn_file" ]] || continue
+  local warned_task_id
+  warned_task_id="$(basename "$warn_file" | sed 's/^\.stale-warned-//')"
+  if [[ ! -f "$ACTIVE_DIR/${warned_task_id}.json" ]]; then
+    rm -f "$warn_file"
+  fi
+done
+
+if [[ "$ISSUES_FOUND" -eq 0 ]]; then
+  # Quiet when everything is fine — no output = no noise
+  :
+else
+  echo "[monitor] Found $ISSUES_FOUND issue(s)."
+fi

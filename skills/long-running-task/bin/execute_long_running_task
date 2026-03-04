@@ -1,0 +1,571 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# execute_long_running_task — unified background process launcher with manifest system
+#
+# Creates a manifest in ~/.openclaw/tasks/active/, captures stdout/stderr,
+# optionally captures NDJSON streams for coding agents, and handles
+# timeout watchdogs, auto-headless flags, and legacy /tmp markers.
+#
+# Notifications: Shell scripts handle deterministic events (start, complete, fail, die).
+# AI handles judgment calls (retry decisions, interpreting results, milestone updates).
+
+# --- Ensure user paths are available (non-interactive shells skip .bashrc) ---
+for _d in "$HOME/.local/bin" "$HOME/bin"; do
+  [[ -d "$_d" && ":$PATH:" != *":$_d:"* ]] && PATH="$_d:$PATH"
+done
+# Load nvm if available (needed for node-based CLIs like claude)
+if [[ -s "$HOME/.nvm/nvm.sh" ]]; then
+  export NVM_DIR="$HOME/.nvm"
+  source "$NVM_DIR/nvm.sh" 2>/dev/null || true
+fi
+# Load GitHub PAT based on workdir context (project-scoped identity)
+# Deferred until --workdir is parsed — see _set_github_identity() below.
+export PATH
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+_set_github_identity() {
+  # Skip if GH_TOKEN already set (e.g., by caller)
+  [[ -n "${GH_TOKEN:-}" ]] && return 0
+
+  # Source the shared GitHub account resolver
+  local lib_path=""
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+  # Try: installed location, then repo location
+  for _p in \
+    "${OPENCLAW_DIR:-$HOME/.openclaw}/lib/resolve_github_account" \
+    "$script_dir/../../../lib/resolve_github_account" \
+  ; do
+    if [[ -f "$_p" ]]; then
+      lib_path="$_p"
+      break
+    fi
+  done
+
+  if [[ -z "$lib_path" ]]; then
+    echo "Warning: resolve_github_account library not found — skipping identity setup" >&2
+    return 0
+  fi
+
+  source "$lib_path"
+  resolve_and_set_identity_from_remote "$WORKDIR"
+}
+
+TASKS_DIR="$HOME/.openclaw/tasks"
+ACTIVE_DIR="$TASKS_DIR/active"
+COMPLETED_DIR="$TASKS_DIR/completed"
+FAILED_DIR="$TASKS_DIR/failed"
+OUTPUT_DIR="$TASKS_DIR/output"
+STREAMS_DIR="$TASKS_DIR/streams"
+
+# Ensure directories exist
+mkdir -p "$ACTIVE_DIR" "$COMPLETED_DIR" "$FAILED_DIR" "$OUTPUT_DIR" "$STREAMS_DIR"
+
+# --- Defaults ---
+MODE=""
+COMMAND=""
+SUMMARY=""
+SESSION_ID=""
+CHANNEL=""
+TARGET=""              # Discord channel/group target ID
+TYPE="command"         # command | coding-agent
+AGENT=""               # claude | gemini | codex
+TIMEOUT=""             # seconds, empty = no timeout
+WORKDIR="$(pwd)"
+WORKTREE=""
+PROMPT_FILE=""
+
+# --- Parse arguments ---
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mode)        MODE="$2"; shift 2 ;;
+    --command)     COMMAND="$2"; shift 2 ;;
+    --summary)     SUMMARY="$2"; shift 2 ;;
+    --session-id)  SESSION_ID="$2"; shift 2 ;;
+    --channel)     CHANNEL="$2"; shift 2 ;;
+    --target)      TARGET="$2"; shift 2 ;;
+    --type)        TYPE="$2"; shift 2 ;;
+    --agent)       AGENT="$2"; shift 2 ;;
+    --timeout)     TIMEOUT="$2"; shift 2 ;;
+    --workdir)     WORKDIR="$2"; shift 2 ;;
+    --worktree)    WORKTREE="$2"; shift 2 ;;
+    --prompt-file) PROMPT_FILE="$2"; shift 2 ;;
+    *)
+      echo "Unknown flag: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# --- Validate ---
+if [[ -z "$COMMAND" ]]; then
+  echo "Error: --command is required" >&2
+  exit 1
+fi
+
+if [[ "$TYPE" == "coding-agent" && -z "$AGENT" ]]; then
+  echo "Error: --agent is required when --type is coding-agent" >&2
+  exit 1
+fi
+
+# --- Set project-scoped GitHub identity based on workdir ---
+_set_github_identity
+
+# --- Generate task ID ---
+TASK_ID="task-$$-$(date +%s)"
+
+# --- File paths ---
+MANIFEST="$ACTIVE_DIR/$TASK_ID.json"
+OUTPUT_FILE="$OUTPUT_DIR/$TASK_ID.log"
+STREAM_FILE=""
+if [[ "$TYPE" == "coding-agent" ]]; then
+  STREAM_FILE="$STREAMS_DIR/$TASK_ID.ndjson"
+fi
+
+STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# --- Build the actual command for coding agents ---
+EXEC_COMMAND="$COMMAND"
+
+if [[ "$TYPE" == "coding-agent" ]]; then
+  case "$AGENT" in
+    claude)
+      # Unset ANTHROPIC_API_KEY to force OAuth subscription billing (configurable)
+      if [[ "${OPENCLAW_UNSET_ANTHROPIC_KEY:-true}" == "true" ]]; then
+        EXEC_COMMAND="env -u ANTHROPIC_API_KEY claude -p --dangerously-skip-permissions --output-format stream-json --verbose"
+      else
+        EXEC_COMMAND="claude -p --dangerously-skip-permissions --output-format stream-json --verbose"
+      fi
+      if [[ -n "$PROMPT_FILE" ]]; then
+        EXEC_COMMAND="$EXEC_COMMAND < $(printf '%q' "$PROMPT_FILE")"
+      else
+        EXEC_COMMAND="$EXEC_COMMAND $(printf '%q' "$COMMAND")"
+      fi
+      ;;
+    gemini)
+      EXEC_COMMAND="gemini -y"
+      if [[ -n "$PROMPT_FILE" ]]; then
+        EXEC_COMMAND="$EXEC_COMMAND < $(printf '%q' "$PROMPT_FILE")"
+      else
+        EXEC_COMMAND="$EXEC_COMMAND $(printf '%q' "$COMMAND")"
+      fi
+      ;;
+    codex)
+      EXEC_COMMAND="codex -s danger-full-access --dangerously-bypass-approvals-and-sandbox --json exec"
+      if [[ -n "$PROMPT_FILE" ]]; then
+        EXEC_COMMAND="$EXEC_COMMAND \"\$(cat $(printf '%q' "$PROMPT_FILE"))\""
+      else
+        EXEC_COMMAND="$EXEC_COMMAND $(printf '%q' "$COMMAND")"
+      fi
+      ;;
+    *)
+      echo "Error: unknown agent '$AGENT'. Supported: claude, gemini, codex" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+# --- Write manifest ---
+AGENT_FLAGS=""
+if [[ "$TYPE" == "coding-agent" ]]; then
+  case "$AGENT" in
+    claude) AGENT_FLAGS="--dangerously-skip-permissions --output-format stream-json" ;;
+    gemini) AGENT_FLAGS="--yolo" ;;
+    codex)  AGENT_FLAGS="--json" ;;
+  esac
+fi
+
+# Use jq to build manifest safely (handles all escaping)
+jq -n \
+  --arg taskId "$TASK_ID" \
+  --arg type "$TYPE" \
+  --arg command "$EXEC_COMMAND" \
+  --arg summary "$SUMMARY" \
+  --arg outputFile "$OUTPUT_FILE" \
+  --arg streamFile "$STREAM_FILE" \
+  --arg workdir "$WORKDIR" \
+  --arg sessionId "$SESSION_ID" \
+  --arg channel "$CHANNEL" \
+  --arg notifyTarget "$TARGET" \
+  --arg startedAt "$STARTED_AT" \
+  --arg timeout "$TIMEOUT" \
+  --arg agent "$AGENT" \
+  --arg agentFlags "$AGENT_FLAGS" \
+  --arg worktree "$WORKTREE" \
+  --arg promptFile "$PROMPT_FILE" \
+  '{
+    taskId: $taskId,
+    pid: null,
+    monitorPid: null,
+    type: $type,
+    command: $command,
+    summary: $summary,
+    outputFile: $outputFile,
+    streamFile: (if $streamFile == "" then null else $streamFile end),
+    workdir: $workdir,
+    sessionId: (if $sessionId == "" then null else $sessionId end),
+    channel: (if $channel == "" then null else $channel end),
+    notifyTarget: (if $notifyTarget == "" then null else $notifyTarget end),
+    startedAt: $startedAt,
+    timeout: (if $timeout == "" then null else ($timeout | tonumber) end),
+    agent: (if $agent == "" then null else $agent end),
+    agentFlags: (if $agentFlags == "" then null else $agentFlags end),
+    worktree: (if $worktree == "" then null else $worktree end),
+    promptFile: (if $promptFile == "" then null else $promptFile end)
+  }' > "$MANIFEST"
+
+# --- Notification helper ---
+# Sends a Discord notification via openclaw CLI. Fire-and-forget.
+# Uses resolve_channel to determine the target.
+notify() {
+  local msg="$1"
+  local resolved_target
+
+  resolved_target="$("$SCRIPT_DIR/resolve_channel" "${TARGET:-}" 2>/dev/null || true)"
+
+  if [[ -z "$resolved_target" ]] || ! command -v openclaw &>/dev/null; then
+    # Log notification attempt even if we can't send
+    echo "[notify] (no target) $msg" >> "$OUTPUT_FILE" 2>/dev/null || true
+    return 0
+  fi
+
+  local channel_flag=""
+  if [[ -n "$CHANNEL" ]]; then
+    channel_flag="--channel $CHANNEL"
+  fi
+
+  # Fire-and-forget: notification failure must never block the task
+  (
+    openclaw message send $channel_flag -t "$resolved_target" -m "$msg" 2>/dev/null || true
+    echo "[notify] sent to $resolved_target: $(echo "$msg" | head -1)" >> "$OUTPUT_FILE" 2>/dev/null || true
+  ) &
+  disown 2>/dev/null || true
+}
+
+# --- Monitor PID watchdog ---
+# Runs as a sibling background process. Survives if the task subshell dies (OOM, SIGKILL).
+# Checks PID liveness every 120s. If PID dies unexpectedly, moves manifest to failed/
+# and sends Discord notification.
+monitor_pid() {
+  local watch_pid="$1"
+  local task_id="$2"
+  local manifest="$3"
+  local summary="$4"
+  local output_file="$5"
+  local started_at="$6"
+
+  while true; do
+    sleep 120
+
+    # If manifest is gone, finalize_task already handled it — exit cleanly
+    if [[ ! -f "$manifest" ]]; then
+      exit 0
+    fi
+
+    # Check if PID is still alive
+    if ! kill -0 "$watch_pid" 2>/dev/null; then
+      # PID is dead but manifest still exists → unexpected death
+      local now
+      now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      # Calculate duration
+      local duration_str=""
+      local start_epoch end_epoch
+      start_epoch="$(date -d "$started_at" +%s 2>/dev/null || echo 0)"
+      end_epoch="$(date +%s)"
+      if [[ "$start_epoch" -gt 0 ]]; then
+        local dur=$((end_epoch - start_epoch))
+        local h=$((dur / 3600)) m=$(( (dur % 3600) / 60 ))
+        if [[ $h -gt 0 ]]; then
+          duration_str="${h}h ${m}m"
+        else
+          duration_str="${m}m"
+        fi
+      fi
+
+      # Get last output lines
+      local output_tail=""
+      if [[ -f "$output_file" ]]; then
+        output_tail="$(tail -10 "$output_file" 2>/dev/null | head -c 600 || true)"
+      fi
+
+      # Determine likely cause
+      local likely_cause="Unknown"
+      # Check dmesg for OOM kills (best-effort, may need sudo)
+      if dmesg 2>/dev/null | tail -50 | grep -qi "oom.*kill\|out of memory" 2>/dev/null; then
+        likely_cause="Likely OOM kill (check dmesg)"
+      else
+        likely_cause="Process died unexpectedly (SIGKILL, crash, or OOM)"
+      fi
+
+      # Move manifest to failed with monitorDetected flag
+      jq --arg failedAt "$now" \
+         --argjson exitCode -9 \
+         --arg note "$likely_cause" \
+         --argjson monitorDetected true \
+        '. + {failedAt: $failedAt, exitCode: $exitCode, note: $note, monitorDetected: $monitorDetected}' \
+        "$manifest" > "$FAILED_DIR/$task_id.json" 2>/dev/null || true
+      rm -f "$manifest"
+
+      # Send Discord notification
+      local notify_msg="**Task died unexpectedly**
+- **Summary:** ${summary}
+- **Task ID:** ${task_id}
+- **Duration:** ${duration_str:-unknown}
+- **Likely cause:** ${likely_cause}
+- **Check:** \`check_task --task-id ${task_id}\`"
+
+      if [[ -n "$output_tail" ]]; then
+        notify_msg="${notify_msg}
+- **Last output:**
+\`\`\`
+${output_tail}
+\`\`\`"
+      fi
+
+      # Use the notify function pattern but inline since we're in a subshell
+      local resolved_target
+      resolved_target="$("$SCRIPT_DIR/resolve_channel" "${TARGET:-}" 2>/dev/null || true)"
+      if [[ -n "$resolved_target" ]] && command -v openclaw &>/dev/null; then
+        local channel_flag=""
+        [[ -n "$CHANNEL" ]] && channel_flag="--channel $CHANNEL"
+        openclaw message send $channel_flag -t "$resolved_target" -m "$notify_msg" 2>/dev/null || true
+      fi
+
+      # Fire system event to wake AI for retry decision
+      if command -v openclaw &>/dev/null; then
+        openclaw system event --text "Task died: $summary (id: $task_id). $likely_cause" --mode now 2>/dev/null || true
+      fi
+
+      exit 0
+    fi
+  done
+}
+
+# --- Finalize: move manifest and notify ---
+finalize_task() {
+  local exit_code="$1"
+  local now
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  if [[ ! -f "$MANIFEST" ]]; then
+    return  # already finalized (e.g., by cleanup_tasks or monitor_pid)
+  fi
+
+  # Kill monitor process if it exists
+  local monitor_pid_val
+  monitor_pid_val="$(jq -r '.monitorPid // empty' "$MANIFEST" 2>/dev/null || true)"
+  if [[ -n "$monitor_pid_val" && "$monitor_pid_val" != "null" ]]; then
+    kill "$monitor_pid_val" 2>/dev/null || true
+  fi
+
+  if [[ $exit_code -eq 0 ]]; then
+    jq --arg completedAt "$now" --argjson exitCode "$exit_code" \
+      '. + {completedAt: $completedAt, exitCode: $exitCode}' \
+      "$MANIFEST" > "$COMPLETED_DIR/$TASK_ID.json" 2>/dev/null || true
+  else
+    jq --arg failedAt "$now" --argjson exitCode "$exit_code" --arg note "Process exited with code $exit_code" \
+      '. + {failedAt: $failedAt, exitCode: $exitCode, note: $note}' \
+      "$MANIFEST" > "$FAILED_DIR/$TASK_ID.json" 2>/dev/null || true
+  fi
+  rm -f "$MANIFEST"
+
+  # --- Build notification message ---
+  local status_word="completed"
+  local status_marker="Task completed"
+  if [[ $exit_code -ne 0 ]]; then
+    status_word="failed (exit $exit_code)"
+    status_marker="Task failed"
+  fi
+
+  local duration_str=""
+  if [[ -n "$STARTED_AT" ]]; then
+    local start_epoch end_epoch
+    start_epoch="$(date -d "$STARTED_AT" +%s 2>/dev/null || echo 0)"
+    end_epoch="$(date -d "$now" +%s 2>/dev/null || echo 0)"
+    if [[ "$start_epoch" -gt 0 && "$end_epoch" -gt 0 ]]; then
+      local dur=$((end_epoch - start_epoch))
+      local h=$((dur / 3600)) m=$(( (dur % 3600) / 60 ))
+      if [[ $h -gt 0 ]]; then
+        duration_str="${h}h ${m}m"
+      else
+        duration_str="${m}m"
+      fi
+    fi
+  fi
+
+  local output_tail=""
+  if [[ -n "$OUTPUT_FILE" && -f "$OUTPUT_FILE" ]]; then
+    output_tail="$(tail -15 "$OUTPUT_FILE" 2>/dev/null | head -c 800 || true)"
+  fi
+
+  local notify_msg="**${status_marker}**
+- **Summary:** ${SUMMARY}
+- **Task ID:** ${TASK_ID}
+- **Exit code:** ${exit_code}${duration_str:+
+- **Duration:** ${duration_str}}
+- **Type:** ${TYPE}${AGENT:+ (${AGENT})}
+- **Check:** \`check_task --task-id ${TASK_ID}\`"
+
+  if [[ -n "$output_tail" ]]; then
+    notify_msg="${notify_msg}
+- **Last output:**
+\`\`\`
+${output_tail}
+\`\`\`"
+  fi
+
+  # Send Discord notification
+  notify "$notify_msg"
+
+  # Also fire system event to wake AI for interpretation
+  if command -v openclaw &>/dev/null; then
+    openclaw system event \
+      --text "Task ${status_word}: ${SUMMARY} (id: ${TASK_ID})" \
+      --mode now 2>/dev/null || true
+  fi
+}
+
+# --- Update manifest PID ---
+update_pid() {
+  local new_pid="$1"
+  local tmp_m
+  tmp_m="$(mktemp)"
+  jq --argjson pid "$new_pid" '.pid = $pid' "$MANIFEST" > "$tmp_m" && mv "$tmp_m" "$MANIFEST"
+}
+
+# --- Update manifest monitor PID ---
+update_monitor_pid() {
+  local new_pid="$1"
+  local tmp_m
+  tmp_m="$(mktemp)"
+  jq --argjson monitorPid "$new_pid" '.monitorPid = $monitorPid' "$MANIFEST" > "$tmp_m" && mv "$tmp_m" "$MANIFEST"
+}
+
+# --- Run the task ---
+# This function contains the core execution logic.
+# It's called either directly (blocking) or via nohup (heartbeat).
+run_task() {
+  cd "$WORKDIR"
+
+  # Signal traps — best-effort (SIGKILL can't be trapped, that's what monitor_pid is for)
+  trap 'finalize_task 130' INT
+  trap 'finalize_task 137' TERM
+
+  # Launch the command
+  if [[ "$TYPE" == "coding-agent" && -n "$STREAM_FILE" ]]; then
+    eval "$EXEC_COMMAND" 2>>"$OUTPUT_FILE" | tee "$STREAM_FILE" >>"$OUTPUT_FILE" &
+  else
+    eval "$EXEC_COMMAND" >>"$OUTPUT_FILE" 2>&1 &
+  fi
+  CMD_PID=$!
+
+  # Update manifest with command PID
+  update_pid "$CMD_PID"
+
+  # --- Timeout watchdog ---
+  WATCHDOG_PID=""
+  if [[ -n "$TIMEOUT" ]]; then
+    (
+      sleep "$TIMEOUT"
+      if kill -0 "$CMD_PID" 2>/dev/null; then
+        echo "[watchdog] Timeout of ${TIMEOUT}s reached. Killing PID $CMD_PID." >> "$OUTPUT_FILE"
+        kill -TERM "$CMD_PID" 2>/dev/null || true
+        sleep 5
+        kill -9 "$CMD_PID" 2>/dev/null || true
+      fi
+    ) &
+    WATCHDOG_PID=$!
+  fi
+
+  # --- Claude stream-json hang watchdog ---
+  HANG_WATCHDOG_PID=""
+  if [[ "$AGENT" == "claude" && -n "$STREAM_FILE" ]]; then
+    (
+      # Wait for the stream file to exist
+      while [[ ! -f "$STREAM_FILE" ]]; do sleep 1; done
+
+      # Tail the stream and watch for the result event
+      tail -f "$STREAM_FILE" 2>/dev/null | while IFS= read -r line; do
+        if echo "$line" | jq -e '.type == "result"' &>/dev/null; then
+          sleep 30
+          if kill -0 "$CMD_PID" 2>/dev/null; then
+            echo "[hang-watchdog] Claude result event detected 30s ago but PID $CMD_PID still alive. Killing." >> "$OUTPUT_FILE"
+            kill -TERM "$CMD_PID" 2>/dev/null || true
+            sleep 5
+            kill -9 "$CMD_PID" 2>/dev/null || true
+          fi
+          break
+        fi
+      done
+    ) &
+    HANG_WATCHDOG_PID=$!
+  fi
+
+  # Wait for the main command
+  CMD_EXIT=0
+  wait "$CMD_PID" 2>/dev/null || CMD_EXIT=$?
+
+  # Clean up watchdogs
+  [[ -n "$WATCHDOG_PID" ]] && kill "$WATCHDOG_PID" 2>/dev/null || true
+  [[ -n "$HANG_WATCHDOG_PID" ]] && kill "$HANG_WATCHDOG_PID" 2>/dev/null || true
+
+  # Finalize
+  finalize_task "$CMD_EXIT"
+  return "$CMD_EXIT"
+}
+
+# --- Launch mode ---
+if [[ "$MODE" == "heartbeat" ]]; then
+  # Background mode: run in a subshell, disown, print info
+  (
+    run_task
+  ) &
+  BG_PID=$!
+  disown "$BG_PID" 2>/dev/null || true
+
+  # Give a moment for the manifest PID to update, then override with the subshell PID
+  # (the subshell PID is what's visible from the outside)
+  update_pid "$BG_PID"
+
+  # --- Launch monitor watchdog (survives if task subshell dies) ---
+  (
+    monitor_pid "$BG_PID" "$TASK_ID" "$MANIFEST" "$SUMMARY" "$OUTPUT_FILE" "$STARTED_AT"
+  ) &
+  MONITOR_PID=$!
+  disown "$MONITOR_PID" 2>/dev/null || true
+  update_monitor_pid "$MONITOR_PID"
+
+  # --- Send "task started" notification ---
+  local_type_label="${TYPE}"
+  if [[ -n "$AGENT" ]]; then
+    local_type_label="${TYPE} (${AGENT})"
+  fi
+
+  notify "**Task started**
+- **Summary:** ${SUMMARY}
+- **Task ID:** ${TASK_ID}
+- **PID:** ${BG_PID}
+- **Type:** ${local_type_label}
+- **Workdir:** ${WORKDIR}
+- **Check:** \`check_task --task-id ${TASK_ID}\`"
+
+  echo "Task launched in background."
+  echo "  Task ID:  $TASK_ID"
+  echo "  PID:      $BG_PID"
+  echo "  Monitor:  $MONITOR_PID"
+  echo "  Manifest: $MANIFEST"
+  echo "  Output:   $OUTPUT_FILE"
+  if [[ -n "$STREAM_FILE" ]]; then
+    echo "  Stream:   $STREAM_FILE"
+  fi
+  echo ""
+  echo "Check status: check_task --task-id $TASK_ID"
+  exit 0
+else
+  # Blocking mode: run directly
+  run_task
+fi

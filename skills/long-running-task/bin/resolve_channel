@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# resolve_channel — resolve Discord notification target ID
+#
+# Priority: $1 argument > OPENCLAW_NOTIFY_TARGET env > openclaw.json heartbeat.to
+# Usage: CHANNEL_ID=$(resolve_channel [explicit_target])
+
+set -euo pipefail
+
+# Ensure jq is available
+for _d in "$HOME/.local/bin" "$HOME/bin"; do
+  [[ -d "$_d" && ":$PATH:" != *":$_d:"* ]] && PATH="$_d:$PATH"
+done
+export PATH
+
+resolve() {
+  # 1. Explicit argument
+  if [[ -n "${1:-}" ]]; then
+    echo "$1"
+    return 0
+  fi
+
+  # 2. Environment variable
+  if [[ -n "${OPENCLAW_NOTIFY_TARGET:-}" ]]; then
+    echo "$OPENCLAW_NOTIFY_TARGET"
+    return 0
+  fi
+
+  # 3. Parse openclaw.json heartbeat config
+  local config="$HOME/.openclaw/openclaw.json"
+  if [[ -f "$config" ]]; then
+    local target
+    target="$(jq -r '.agents.defaults.heartbeat.to // empty' "$config" 2>/dev/null)"
+    if [[ -n "$target" ]]; then
+      echo "$target"
+      return 0
+    fi
+  fi
+
+  # No target found
+  return 1
+}
+
+resolve "${1:-}"

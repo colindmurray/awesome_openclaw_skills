@@ -1,0 +1,471 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# check_task — unified task status checker
+#
+# Scans manifests, verifies PIDs, analyzes output, and generates status reports
+# for ALL background tasks (coding agents and generic commands).
+
+# --- Ensure user paths are available ---
+for _d in "$HOME/.local/bin" "$HOME/bin"; do
+  [[ -d "$_d" && ":$PATH:" != *":$_d:"* ]] && PATH="$_d:$PATH"
+done
+export PATH
+
+TASKS_DIR="$HOME/.openclaw/tasks"
+ACTIVE_DIR="$TASKS_DIR/active"
+COMPLETED_DIR="$TASKS_DIR/completed"
+FAILED_DIR="$TASKS_DIR/failed"
+
+# --- Defaults ---
+TASK_ID=""
+SESSION_ID=""
+ALL=false
+JSON_OUTPUT=false
+STALL_THRESHOLD=600  # seconds
+
+# --- Parse arguments ---
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --task-id)          TASK_ID="$2"; shift 2 ;;
+    --session-id)       SESSION_ID="$2"; shift 2 ;;
+    --all)              ALL=true; shift ;;
+    --json)             JSON_OUTPUT=true; shift ;;
+    --stall-threshold)  STALL_THRESHOLD="$2"; shift 2 ;;
+    *)
+      echo "Unknown flag: $1" >&2
+      echo "Usage: check_task [--task-id ID] [--session-id ID] [--all] [--json] [--stall-threshold SECS]" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "$TASK_ID" && -z "$SESSION_ID" && "$ALL" != true ]]; then
+  echo "Error: specify --task-id, --session-id, or --all" >&2
+  exit 1
+fi
+
+# --- Helper: format seconds as human-readable ---
+format_duration() {
+  local secs=$1
+  local hours=$((secs / 3600))
+  local mins=$(( (secs % 3600) / 60 ))
+  local s=$((secs % 60))
+  if [[ $hours -gt 0 ]]; then
+    printf '%dh %dm %ds' "$hours" "$mins" "$s"
+  elif [[ $mins -gt 0 ]]; then
+    printf '%dm %ds' "$mins" "$s"
+  else
+    printf '%ds' "$s"
+  fi
+}
+
+# --- Helper: get system memory info ---
+get_memory_info() {
+  if [[ ! -f /proc/meminfo ]]; then
+    echo ""
+    return
+  fi
+  local mem_total mem_avail usage_pct
+  mem_total="$(grep '^MemTotal:' /proc/meminfo | awk '{print $2}')"
+  mem_avail="$(grep '^MemAvailable:' /proc/meminfo | awk '{print $2}')"
+  if [[ -n "$mem_total" && -n "$mem_avail" && "$mem_total" -gt 0 ]]; then
+    usage_pct=$(( (mem_total - mem_avail) * 100 / mem_total ))
+    echo "${usage_pct}% used ($(( mem_avail / 1024 ))MB free of $(( mem_total / 1024 ))MB)"
+  fi
+}
+
+# --- Collect manifests to check ---
+collect_manifests() {
+  local manifests=()
+
+  # Active tasks
+  if [[ -d "$ACTIVE_DIR" ]]; then
+    for f in "$ACTIVE_DIR"/*.json; do
+      [[ -f "$f" ]] && manifests+=("$f")
+    done
+  fi
+
+  # Also check completed/failed if looking for a specific task
+  if [[ -n "$TASK_ID" ]]; then
+    [[ -f "$COMPLETED_DIR/$TASK_ID.json" ]] && manifests+=("$COMPLETED_DIR/$TASK_ID.json")
+    [[ -f "$FAILED_DIR/$TASK_ID.json" ]] && manifests+=("$FAILED_DIR/$TASK_ID.json")
+  fi
+
+  # Filter by task-id or session-id
+  for f in "${manifests[@]}"; do
+    if [[ -n "$TASK_ID" ]]; then
+      local tid
+      tid="$(jq -r '.taskId // empty' "$f" 2>/dev/null)"
+      [[ "$tid" == "$TASK_ID" ]] && echo "$f"
+    elif [[ -n "$SESSION_ID" ]]; then
+      local sid
+      sid="$(jq -r '.sessionId // empty' "$f" 2>/dev/null)"
+      [[ "$sid" == "$SESSION_ID" ]] && echo "$f"
+    elif [[ "$ALL" == true ]]; then
+      echo "$f"
+    fi
+  done
+}
+
+# --- Check a single task ---
+check_one_task() {
+  local manifest="$1"
+
+  if [[ ! -f "$manifest" ]]; then
+    echo "Manifest not found: $manifest"
+    return 1
+  fi
+
+  # Read manifest fields
+  local task_id pid type summary output_file stream_file started_at timeout agent workdir worktree
+  local monitor_pid_val monitor_detected notify_target
+  task_id="$(jq -r '.taskId' "$manifest")"
+  pid="$(jq -r '.pid // empty' "$manifest")"
+  type="$(jq -r '.type // "command"' "$manifest")"
+  summary="$(jq -r '.summary // "no summary"' "$manifest")"
+  output_file="$(jq -r '.outputFile // empty' "$manifest")"
+  stream_file="$(jq -r '.streamFile // empty' "$manifest")"
+  started_at="$(jq -r '.startedAt // empty' "$manifest")"
+  timeout="$(jq -r '.timeout // empty' "$manifest")"
+  agent="$(jq -r '.agent // empty' "$manifest")"
+  workdir="$(jq -r '.workdir // empty' "$manifest")"
+  worktree="$(jq -r '.worktree // empty' "$manifest")"
+  monitor_pid_val="$(jq -r '.monitorPid // empty' "$manifest")"
+  monitor_detected="$(jq -r '.monitorDetected // empty' "$manifest")"
+  notify_target="$(jq -r '.notifyTarget // empty' "$manifest")"
+
+  # Check if this is a completed/failed manifest
+  local completed_at failed_at exit_code note
+  completed_at="$(jq -r '.completedAt // empty' "$manifest")"
+  failed_at="$(jq -r '.failedAt // empty' "$manifest")"
+  exit_code="$(jq -r '.exitCode // empty' "$manifest")"
+  note="$(jq -r '.note // empty' "$manifest")"
+
+  # --- Determine status ---
+  local status="unknown"
+  local health="unknown"
+  local pid_alive=false
+  local monitor_alive=false
+
+  if [[ -n "$completed_at" ]]; then
+    status="completed"
+    health="ok"
+  elif [[ -n "$failed_at" ]]; then
+    status="failed"
+    health="error"
+  elif [[ -n "$pid" && "$pid" != "null" ]]; then
+    if kill -0 "$pid" 2>/dev/null; then
+      pid_alive=true
+      status="running"
+      health="ok"
+    else
+      status="dead"
+      health="error"
+      # Auto-move dead PID to failed
+      local now
+      now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      jq --arg failedAt "$now" --argjson exitCode -1 --arg note "Process died (PID $pid not found)" \
+        '. + {failedAt: $failedAt, exitCode: $exitCode, note: $note}' \
+        "$manifest" > "$FAILED_DIR/$task_id.json" 2>/dev/null || true
+      rm -f "$manifest"
+    fi
+  fi
+
+  # Check monitor PID status
+  if [[ -n "$monitor_pid_val" && "$monitor_pid_val" != "null" ]]; then
+    if kill -0 "$monitor_pid_val" 2>/dev/null; then
+      monitor_alive=true
+    fi
+  fi
+
+  # --- Runtime ---
+  local runtime_secs=0
+  local runtime_str="unknown"
+  if [[ -n "$started_at" ]]; then
+    local start_epoch
+    start_epoch="$(date -d "$started_at" +%s 2>/dev/null || echo 0)"
+    local now_epoch
+    now_epoch="$(date +%s)"
+    if [[ "$start_epoch" -gt 0 ]]; then
+      runtime_secs=$((now_epoch - start_epoch))
+      runtime_str="$(format_duration "$runtime_secs")"
+    fi
+  fi
+
+  # --- Output analysis ---
+  local output_size=0
+  local output_lines=0
+  local output_freshness=""
+  local output_stale=false
+  local last_output=""
+
+  if [[ -n "$output_file" && -f "$output_file" ]]; then
+    output_size="$(stat -c%s "$output_file" 2>/dev/null || echo 0)"
+    output_lines="$(wc -l < "$output_file" 2>/dev/null || echo 0)"
+
+    # Freshness check
+    local mtime
+    mtime="$(stat -c%Y "$output_file" 2>/dev/null || echo 0)"
+    local now_epoch
+    now_epoch="$(date +%s)"
+    local age=$((now_epoch - mtime))
+    output_freshness="$(format_duration "$age") ago"
+
+    if [[ "$status" == "running" && "$age" -gt "$STALL_THRESHOLD" ]]; then
+      output_stale=true
+      health="stalled"
+    fi
+
+    # Last 20 lines of output
+    last_output="$(tail -20 "$output_file" 2>/dev/null || echo "(empty)")"
+  fi
+
+  # --- Coding agent deep analysis ---
+  local tool_count=0
+  local error_count=0
+  local phase="unknown"
+  local git_commits=""
+  local git_diff_stat=""
+  local result_event=false
+  local recent_thinking=""
+
+  if [[ "$type" == "coding-agent" && -n "$stream_file" && -f "$stream_file" ]]; then
+    local stream_size
+    stream_size="$(stat -c%s "$stream_file" 2>/dev/null || echo 0)"
+
+    if [[ "$stream_size" -gt 0 ]] && command -v jq &>/dev/null; then
+      # Count tool_use events
+      tool_count="$(jq -s '[.[] | select(.type == "content_block_start" and .content_block.type == "tool_use")] | length' "$stream_file" 2>/dev/null || echo 0)"
+
+      # Count error events
+      error_count="$(jq -s '[.[] | select(.type == "error" or (.type == "content_block_delta" and (.delta.text // "" | test("error|Error|ERROR"))))] | length' "$stream_file" 2>/dev/null || echo 0)"
+
+      # Check for result event (Claude completion)
+      if jq -e 'select(.type == "result")' "$stream_file" &>/dev/null; then
+        result_event=true
+      fi
+
+      # Extract recent thinking/text (last 5 text blocks)
+      recent_thinking="$(jq -r 'select(.type == "content_block_delta" and .delta.type == "text_delta") | .delta.text // empty' "$stream_file" 2>/dev/null | tail -500 | tail -c 2000 || echo "")"
+
+      # Phase estimation based on tool usage
+      local read_ops edit_ops bash_ops
+      read_ops="$(jq -s '[.[] | select(.type == "content_block_start" and .content_block.type == "tool_use" and (.content_block.name // "" | test("read|Read|glob|Glob|grep|Grep|search")))] | length' "$stream_file" 2>/dev/null || echo 0)"
+      edit_ops="$(jq -s '[.[] | select(.type == "content_block_start" and .content_block.type == "tool_use" and (.content_block.name // "" | test("edit|Edit|write|Write")))] | length' "$stream_file" 2>/dev/null || echo 0)"
+      bash_ops="$(jq -s '[.[] | select(.type == "content_block_start" and .content_block.type == "tool_use" and (.content_block.name // "" | test("bash|Bash|command")))] | length' "$stream_file" 2>/dev/null || echo 0)"
+
+      if [[ "$read_ops" -gt "$edit_ops" && "$read_ops" -gt "$bash_ops" ]]; then
+        phase="exploring"
+      elif [[ "$edit_ops" -gt "$read_ops" && "$edit_ops" -gt "$bash_ops" ]]; then
+        phase="implementing"
+      elif [[ "$bash_ops" -gt "$read_ops" && "$bash_ops" -gt "$edit_ops" ]]; then
+        phase="testing"
+      elif [[ "$tool_count" -eq 0 ]]; then
+        phase="thinking"
+      else
+        phase="mixed"
+      fi
+
+      # Claude hang detection
+      if [[ "$result_event" == true && "$pid_alive" == true ]]; then
+        health="hang-detected"
+      fi
+    fi
+
+    # Git progress (if workdir or worktree is a git repo)
+    local git_dir="${worktree:-$workdir}"
+    if [[ -n "$git_dir" && -d "$git_dir/.git" ]] || git -C "$git_dir" rev-parse --git-dir &>/dev/null 2>&1; then
+      git_commits="$(git -C "$git_dir" log --oneline --since="$started_at" 2>/dev/null | head -20 || echo "")"
+      git_diff_stat="$(git -C "$git_dir" diff --stat 2>/dev/null || echo "")"
+    fi
+  fi
+
+  # --- Output report ---
+  if [[ "$JSON_OUTPUT" == true ]]; then
+    local mem_info
+    mem_info="$(get_memory_info)"
+
+    jq -n \
+      --arg taskId "$task_id" \
+      --arg status "$status" \
+      --arg health "$health" \
+      --arg type "$type" \
+      --arg summary "$summary" \
+      --arg agent "$agent" \
+      --arg runtime "$runtime_str" \
+      --argjson runtimeSecs "$runtime_secs" \
+      --arg pid "$pid" \
+      --argjson pidAlive "$pid_alive" \
+      --arg monitorPid "${monitor_pid_val:-}" \
+      --argjson monitorAlive "$monitor_alive" \
+      --arg monitorDetected "${monitor_detected:-}" \
+      --arg notifyTarget "${notify_target:-}" \
+      --argjson outputSize "$output_size" \
+      --argjson outputLines "$output_lines" \
+      --arg outputFreshness "$output_freshness" \
+      --argjson outputStale "$output_stale" \
+      --arg lastOutput "$last_output" \
+      --argjson toolCount "$tool_count" \
+      --argjson errorCount "$error_count" \
+      --arg phase "$phase" \
+      --argjson resultEvent "$result_event" \
+      --arg gitCommits "$git_commits" \
+      --arg gitDiffStat "$git_diff_stat" \
+      --arg exitCode "${exit_code:-}" \
+      --arg note "${note:-}" \
+      --arg memoryInfo "$mem_info" \
+      '{
+        taskId: $taskId,
+        status: $status,
+        health: $health,
+        type: $type,
+        summary: $summary,
+        agent: $agent,
+        runtime: $runtime,
+        runtimeSecs: $runtimeSecs,
+        pid: $pid,
+        pidAlive: $pidAlive,
+        monitor: {
+          pid: (if $monitorPid != "" then $monitorPid else null end),
+          alive: $monitorAlive,
+          detected: (if $monitorDetected == "true" then true else false end)
+        },
+        notifyTarget: (if $notifyTarget != "" then $notifyTarget else null end),
+        output: {
+          size: $outputSize,
+          lines: $outputLines,
+          freshness: $outputFreshness,
+          stale: $outputStale,
+          last20Lines: $lastOutput
+        },
+        codingAgent: (if $type == "coding-agent" then {
+          toolCount: $toolCount,
+          errorCount: $errorCount,
+          phase: $phase,
+          resultEvent: $resultEvent,
+          gitCommits: $gitCommits,
+          gitDiffStat: $gitDiffStat
+        } else null end),
+        exitCode: (if $exitCode != "" then ($exitCode | tonumber) else null end),
+        note: (if $note != "" then $note else null end),
+        system: {
+          memory: (if $memoryInfo != "" then $memoryInfo else null end)
+        }
+      }'
+    return
+  fi
+
+  # Human-readable report
+  echo "═══════════════════════════════════════════════════"
+  echo "Task:    $task_id"
+  echo "Summary: $summary"
+  echo "Type:    $type$(if [[ -n "$agent" ]]; then echo " ($agent)"; fi)"
+  echo "Status:  $status"
+  echo "Health:  $health"
+  echo "Runtime: $runtime_str"
+  echo "PID:     ${pid:-none}$(if [[ "$pid_alive" == true ]]; then echo " (alive)"; else echo " (dead)"; fi)"
+
+  # Monitor info
+  if [[ -n "$monitor_pid_val" && "$monitor_pid_val" != "null" ]]; then
+    echo "Monitor: $monitor_pid_val$(if [[ "$monitor_alive" == true ]]; then echo " (alive)"; else echo " (dead)"; fi)"
+  fi
+  if [[ "$monitor_detected" == "true" ]]; then
+    echo "  ** Death detected by monitor (fast-path, <2 min) **"
+  fi
+
+  if [[ -n "$exit_code" ]]; then
+    echo "Exit:    $exit_code"
+  fi
+  if [[ -n "$note" ]]; then
+    echo "Note:    $note"
+  fi
+
+  echo "───────────────────────────────────────────────────"
+  echo "Output:  $output_lines lines, $(numfmt --to=iec "$output_size" 2>/dev/null || echo "${output_size}B")"
+  echo "Fresh:   $output_freshness"
+
+  if [[ "$output_stale" == true ]]; then
+    echo "  OUTPUT STALE — no writes for over ${STALL_THRESHOLD}s"
+  fi
+
+  # System memory
+  local mem_info
+  mem_info="$(get_memory_info)"
+  if [[ -n "$mem_info" ]]; then
+    echo "Memory:  $mem_info"
+  fi
+
+  if [[ "$type" == "coding-agent" ]]; then
+    echo "───────────────────────────────────────────────────"
+    echo "Agent Analysis:"
+    echo "  Tools used: $tool_count"
+    echo "  Errors:     $error_count"
+    echo "  Phase:      $phase"
+    if [[ "$result_event" == true ]]; then
+      echo "  Result event received"
+      if [[ "$pid_alive" == true ]]; then
+        echo "  HANG DETECTED — result received but PID still alive (safe to kill)"
+      fi
+    fi
+
+    if [[ -n "$git_commits" ]]; then
+      echo "  Git commits since start:"
+      echo "$git_commits" | sed 's/^/    /'
+    fi
+    if [[ -n "$git_diff_stat" ]]; then
+      echo "  Unstaged changes:"
+      echo "$git_diff_stat" | sed 's/^/    /'
+    fi
+  fi
+
+  if [[ -n "$last_output" ]]; then
+    echo "───────────────────────────────────────────────────"
+    echo "Last output:"
+    echo "$last_output" | sed 's/^/  /'
+  fi
+
+  if [[ -n "$recent_thinking" && "$type" == "coding-agent" ]]; then
+    echo "───────────────────────────────────────────────────"
+    echo "Recent agent text:"
+    echo "$recent_thinking" | tail -c 1000 | sed 's/^/  /'
+  fi
+
+  echo "═══════════════════════════════════════════════════"
+  echo ""
+}
+
+# --- Main ---
+MANIFESTS=()
+while IFS= read -r m; do
+  [[ -n "$m" ]] && MANIFESTS+=("$m")
+done < <(collect_manifests)
+
+if [[ ${#MANIFESTS[@]} -eq 0 ]]; then
+  if [[ "$JSON_OUTPUT" == true ]]; then
+    echo '{"tasks": [], "message": "No matching tasks found"}'
+  else
+    echo "No matching tasks found."
+    if [[ -n "$TASK_ID" ]]; then
+      echo "Searched for task-id: $TASK_ID"
+    elif [[ -n "$SESSION_ID" ]]; then
+      echo "Searched for session-id: $SESSION_ID"
+    fi
+  fi
+  exit 0
+fi
+
+if [[ "$JSON_OUTPUT" == true && ${#MANIFESTS[@]} -gt 1 ]]; then
+  echo '{"tasks": ['
+  _first=true
+  for manifest in "${MANIFESTS[@]}"; do
+    if [[ "$_first" != true ]]; then echo ","; fi
+    _first=false
+    check_one_task "$manifest"
+  done
+  echo ']}'
+else
+  for manifest in "${MANIFESTS[@]}"; do
+    check_one_task "$manifest"
+  done
+fi

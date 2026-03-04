@@ -1,0 +1,601 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# cleanup_tasks — periodic maintenance for the task manifest system
+#
+# Called by HEARTBEAT.md every 30 minutes.
+# Detects dead PIDs, sends stall warnings, prunes old files,
+# and reports on completed/failed tasks that haven't been notified yet.
+#
+# Note: monitor_pid() and monitor_task (cron) provide faster detection.
+# This script is the safety net — it catches anything they missed.
+
+# --- Ensure user paths are available (non-interactive shells skip .bashrc) ---
+for _d in "$HOME/.local/bin" "$HOME/bin"; do
+  [[ -d "$_d" && ":$PATH:" != *":$_d:"* ]] && PATH="$_d:$PATH"
+done
+if [[ -s "$HOME/.nvm/nvm.sh" ]]; then
+  export NVM_DIR="$HOME/.nvm"
+  source "$NVM_DIR/nvm.sh" 2>/dev/null || true
+fi
+export PATH
+
+TASKS_DIR="$HOME/.openclaw/tasks"
+ACTIVE_DIR="$TASKS_DIR/active"
+COMPLETED_DIR="$TASKS_DIR/completed"
+FAILED_DIR="$TASKS_DIR/failed"
+OUTPUT_DIR="$TASKS_DIR/output"
+STREAMS_DIR="$TASKS_DIR/streams"
+
+# --- Defaults ---
+MAX_AGE=7             # days
+STALL_THRESHOLD=1800  # seconds (30 min)
+CHANNEL="discord"
+
+# --- Parse arguments ---
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --max-age)          MAX_AGE="$2"; shift 2 ;;
+    --stall-threshold)  STALL_THRESHOLD="$2"; shift 2 ;;
+    --channel)          CHANNEL="$2"; shift 2 ;;
+    *)
+      echo "Unknown flag: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# Ensure directories exist
+mkdir -p "$ACTIVE_DIR" "$COMPLETED_DIR" "$FAILED_DIR" "$OUTPUT_DIR" "$STREAMS_DIR"
+
+ACTIONS_TAKEN=0
+
+notify() {
+  local message="$1"
+  if command -v openclaw &>/dev/null && [[ -n "$CHANNEL" ]]; then
+    openclaw system event --text "$message" --mode now 2>/dev/null || true
+  fi
+  echo "[cleanup] $message"
+}
+
+# --- 1. Dead PID detection ---
+echo "[cleanup] Scanning active tasks for dead PIDs..."
+for manifest in "$ACTIVE_DIR"/*.json; do
+  [[ -f "$manifest" ]] || continue
+
+  # Handle 0-byte / corrupt manifests
+  if [[ ! -s "$manifest" ]]; then
+    echo "[cleanup] Removing 0-byte orphaned manifest: $(basename "$manifest")"
+    rm -f "$manifest"
+    ACTIONS_TAKEN=$((ACTIONS_TAKEN + 1))
+    continue
+  fi
+
+  task_id="$(jq -r '.taskId // empty' "$manifest" 2>/dev/null)"
+  pid="$(jq -r '.pid // empty' "$manifest" 2>/dev/null)"
+  summary="$(jq -r '.summary // "unknown task"' "$manifest" 2>/dev/null)"
+  monitor_pid_val="$(jq -r '.monitorPid // empty' "$manifest" 2>/dev/null)"
+
+  if [[ -z "$task_id" ]]; then
+    echo "[cleanup] Removing unparseable manifest: $(basename "$manifest")"
+    rm -f "$manifest"
+    ACTIONS_TAKEN=$((ACTIONS_TAKEN + 1))
+    continue
+  fi
+
+  if [[ -z "$pid" || "$pid" == "null" ]]; then
+    continue
+  fi
+
+  if ! kill -0 "$pid" 2>/dev/null; then
+    # Check if monitor_pid or monitor_task already handled this
+    if [[ -f "$FAILED_DIR/$task_id.json" ]]; then
+      local already_detected
+      already_detected="$(jq -r '.monitorDetected // empty' "$FAILED_DIR/$task_id.json" 2>/dev/null || true)"
+      if [[ "$already_detected" == "true" ]]; then
+        echo "[cleanup] Dead task $task_id already detected by monitor — skipping re-notification"
+        rm -f "$manifest"
+        # Kill orphaned monitor process
+        if [[ -n "$monitor_pid_val" && "$monitor_pid_val" != "null" ]]; then
+          kill "$monitor_pid_val" 2>/dev/null || true
+        fi
+        ACTIONS_TAKEN=$((ACTIONS_TAKEN + 1))
+        continue
+      fi
+    fi
+
+    # PID is dead and not yet handled — move to failed
+    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    jq --arg failedAt "$now" --argjson exitCode -1 --arg note "Process died (PID $pid not found during cleanup)" \
+      '. + {failedAt: $failedAt, exitCode: $exitCode, note: $note}' \
+      "$manifest" > "$FAILED_DIR/$task_id.json" 2>/dev/null || true
+    rm -f "$manifest"
+
+    # Kill orphaned monitor process
+    if [[ -n "$monitor_pid_val" && "$monitor_pid_val" != "null" ]]; then
+      kill "$monitor_pid_val" 2>/dev/null || true
+    fi
+
+    notify "Dead task detected: $summary (id: $task_id, PID $pid was not running)"
+    ACTIONS_TAKEN=$((ACTIONS_TAKEN + 1))
+  fi
+done
+
+# --- 2. Stall detection ---
+echo "[cleanup] Checking for stalled tasks..."
+for manifest in "$ACTIVE_DIR"/*.json; do
+  [[ -f "$manifest" ]] || continue
+
+  task_id="$(jq -r '.taskId // empty' "$manifest" 2>/dev/null)"
+  summary="$(jq -r '.summary // "unknown task"' "$manifest" 2>/dev/null)"
+  output_file="$(jq -r '.outputFile // empty' "$manifest" 2>/dev/null)"
+
+  if [[ -z "$output_file" || ! -f "$output_file" ]]; then
+    continue
+  fi
+
+  # Check output file freshness
+  mtime="$(stat -c%Y "$output_file" 2>/dev/null || echo 0)"
+  now_epoch="$(date +%s)"
+  age=$((now_epoch - mtime))
+
+  if [[ "$age" -gt "$STALL_THRESHOLD" ]]; then
+    hours=$((age / 3600))
+    mins=$(( (age % 3600) / 60 ))
+    notify "Stall warning: '$summary' (id: $task_id) — no output for ${hours}h ${mins}m"
+    ACTIONS_TAKEN=$((ACTIONS_TAKEN + 1))
+  fi
+done
+
+# --- 3. Report unnotified completed/failed tasks ---
+echo "[cleanup] Checking for unnotified completed/failed tasks..."
+PENDING_NOTIFICATIONS=0
+
+report_unnotified() {
+  local dir="$1"
+  local status_label="$2"
+
+  for manifest in "$dir"/*.json; do
+    [[ -f "$manifest" && -s "$manifest" ]] || continue
+
+    # Skip tasks already notified
+    local notified_at
+    notified_at="$(jq -r '.notifiedAt // empty' "$manifest" 2>/dev/null)"
+    if [[ -n "$notified_at" ]]; then
+      continue
+    fi
+
+    # Auto-mark monitorDetected tasks as notified (monitor already sent Discord notification)
+    local monitor_detected
+    monitor_detected="$(jq -r '.monitorDetected // empty' "$manifest" 2>/dev/null)"
+    if [[ "$monitor_detected" == "true" ]]; then
+      local now
+      now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      local tmp_m
+      tmp_m="$(mktemp)"
+      if jq --arg notifiedAt "$now" '. + {notifiedAt: $notifiedAt}' "$manifest" > "$tmp_m" 2>/dev/null; then
+        mv "$tmp_m" "$manifest"
+      else
+        rm -f "$tmp_m"
+      fi
+      echo "[cleanup] Task $(jq -r '.taskId' "$manifest" 2>/dev/null) already notified by monitor — marking notifiedAt"
+      continue
+    fi
+
+    local task_id summary exit_code output_file stream_file started_at ended_at worktree type agent
+    task_id="$(jq -r '.taskId // empty' "$manifest" 2>/dev/null)"
+    summary="$(jq -r '.summary // "unknown task"' "$manifest" 2>/dev/null)"
+    exit_code="$(jq -r '.exitCode // "unknown"' "$manifest" 2>/dev/null)"
+    output_file="$(jq -r '.outputFile // empty' "$manifest" 2>/dev/null)"
+    stream_file="$(jq -r '.streamFile // empty' "$manifest" 2>/dev/null)"
+    started_at="$(jq -r '.startedAt // empty' "$manifest" 2>/dev/null)"
+    ended_at="$(jq -r '.completedAt // .failedAt // empty' "$manifest" 2>/dev/null)"
+    worktree="$(jq -r '.worktree // empty' "$manifest" 2>/dev/null)"
+    type="$(jq -r '.type // "command"' "$manifest" 2>/dev/null)"
+    agent="$(jq -r '.agent // empty' "$manifest" 2>/dev/null)"
+
+    [[ -z "$task_id" ]] && continue
+
+    PENDING_NOTIFICATIONS=$((PENDING_NOTIFICATIONS + 1))
+
+    # Print structured report for the heartbeat agent to relay
+    echo ""
+    echo "=== TASK $status_label: $task_id ==="
+    echo "Summary: $summary"
+    echo "Status: $status_label (exit code: $exit_code)"
+    echo "Type: $type${agent:+ ($agent)}"
+    echo "Started: $started_at"
+    echo "Ended: $ended_at"
+
+    # Extract output summary
+    if [[ -n "$output_file" && -f "$output_file" ]]; then
+      local line_count
+      line_count="$(wc -l < "$output_file" 2>/dev/null || echo 0)"
+      echo "Output: $output_file ($line_count lines)"
+
+      # For coding agents with NDJSON, extract text summaries instead of raw JSON
+      if [[ "$type" == "coding-agent" && -n "$stream_file" && -f "$stream_file" ]]; then
+        local tool_count error_count has_result
+        tool_count="$(grep -c '"type":"tool_use"' "$stream_file" 2>/dev/null || true)"
+        error_count="$(grep -c '"is_error":true' "$stream_file" 2>/dev/null || true)"
+        has_result="$(grep -c '"type":"result"' "$stream_file" 2>/dev/null || true)"
+        echo "Agent stats: ${tool_count:-0} tool calls, ${error_count:-0} errors, result_event=${has_result:-0}"
+
+        # Extract the last assistant text message (human-readable summary)
+        echo "--- Agent final output (last text) ---"
+        grep '"type":"assistant"' "$stream_file" 2>/dev/null \
+          | tail -1 \
+          | python3 -c "
+import sys, json
+try:
+    d = json.loads(sys.stdin.readline())
+    msg = d.get('message', {})
+    for block in msg.get('content', []):
+        if block.get('type') == 'text':
+            print(block['text'][:1500])
+            break
+    else:
+        print('(no text content in last assistant message)')
+except:
+    print('(could not parse agent output)')
+" 2>/dev/null || echo "(could not extract agent text)"
+        echo "--- End agent output ---"
+      else
+        # For non-agent tasks, show last few lines (capped)
+        echo "--- Last 20 lines of output ---"
+        tail -20 "$output_file" 2>/dev/null | head -c 1500 || echo "(could not read output)"
+        echo ""
+        echo "--- End output ---"
+      fi
+    fi
+
+    # Note worktree if present
+    if [[ -n "$worktree" && "$worktree" != "null" ]]; then
+      if [[ -d "$worktree" ]]; then
+        echo "Worktree: $worktree (exists — can be cleaned up)"
+      else
+        echo "Worktree: $worktree (already removed)"
+      fi
+    fi
+
+    # Check for failure note
+    local note
+    note="$(jq -r '.note // empty' "$manifest" 2>/dev/null)"
+    if [[ -n "$note" ]]; then
+      echo "Note: $note"
+    fi
+
+    echo "=== END $task_id ==="
+
+    # Mark as notified
+    local now
+    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    local tmp_m
+    tmp_m="$(mktemp)"
+    if jq --arg notifiedAt "$now" '. + {notifiedAt: $notifiedAt}' "$manifest" > "$tmp_m" 2>/dev/null; then
+      mv "$tmp_m" "$manifest"
+    else
+      rm -f "$tmp_m"
+    fi
+
+    ACTIONS_TAKEN=$((ACTIONS_TAKEN + 1))
+  done
+}
+
+report_unnotified "$COMPLETED_DIR" "COMPLETED"
+report_unnotified "$FAILED_DIR" "FAILED"
+
+if [[ $PENDING_NOTIFICATIONS -gt 0 ]]; then
+  echo ""
+  echo "[cleanup] Found $PENDING_NOTIFICATIONS task(s) awaiting notification. Relay these to the user via Discord."
+fi
+
+# --- 4. Prune old files ---
+echo "[cleanup] Pruning files older than $MAX_AGE days..."
+
+prune_dir() {
+  local dir="$1"
+  local pattern="$2"
+  local count=0
+  if [[ -d "$dir" ]]; then
+    while IFS= read -r -d '' f; do
+      rm -f "$f"
+      count=$((count + 1))
+    done < <(find "$dir" -name "$pattern" -mtime +"$MAX_AGE" -print0 2>/dev/null)
+    if [[ $count -gt 0 ]]; then
+      echo "[cleanup] Pruned $count old files from $dir"
+      ACTIONS_TAKEN=$((ACTIONS_TAKEN + count))
+    fi
+  fi
+}
+
+prune_dir "$COMPLETED_DIR" "*.json"
+prune_dir "$FAILED_DIR" "*.json"
+prune_dir "$OUTPUT_DIR" "*.log"
+prune_dir "$STREAMS_DIR" "*.ndjson"
+
+# Also prune legacy /tmp markers
+while IFS= read -r -d '' f; do
+  rm -f "$f"
+done < <(find /tmp -name "task-complete-*.json" -mtime +"$MAX_AGE" -print0 2>/dev/null || true)
+
+# --- 5. Clean up stale-warned state files for non-active tasks ---
+echo "[cleanup] Cleaning up stale-warned state files..."
+for warn_file in "$TASKS_DIR"/.stale-warned-*; do
+  [[ -f "$warn_file" ]] || continue
+  local warned_task_id
+  warned_task_id="$(basename "$warn_file" | sed 's/^\.stale-warned-//')"
+  if [[ ! -f "$ACTIVE_DIR/${warned_task_id}.json" ]]; then
+    rm -f "$warn_file"
+  fi
+done
+
+# --- 6. Clean up worktrees for merged PRs ---
+echo "[cleanup] Checking for worktrees to clean up (merged PRs only)..."
+_WORKTREE_CLEANUP_AGE=1800  # 30 min minimum age before worktree cleanup
+
+# Extract PR number and repo from command/prompt
+extract_pr_info() {
+  local cmd="$1"
+  local pr_num="" repo=""
+
+  # Try to extract PR number (e.g., "PR #1" or "pr 1" or "pull/1")
+  pr_num="$(echo "$cmd" | grep -oiE '(PR #[0-9]+|pr [0-9]+|pull/[0-9]+)' | grep -oE '[0-9]+' | head -1)"
+
+  # Try to extract repo (e.g., "owner/repo-name")
+  repo="$(echo "$cmd" | grep -oE '[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+' | head -1)"
+
+  echo "$pr_num|$repo"
+}
+
+# Check if a PR is merged using gh CLI
+is_pr_merged() {
+  local pr_num="$1"
+  local repo="$2"
+
+  if [[ -z "$pr_num" || -z "$repo" ]]; then
+    echo "unknown"
+    return 1
+  fi
+
+  if ! command -v gh &>/dev/null; then
+    echo "unknown"
+    return 1
+  fi
+
+  local state merged_at
+  state="$(gh pr view "$pr_num" --repo "$repo" --json state --jq '.state' 2>/dev/null || echo "")"
+  merged_at="$(gh pr view "$pr_num" --repo "$repo" --json mergedAt --jq '.mergedAt' 2>/dev/null || echo "")"
+
+  if [[ "$state" == "MERGED" || -n "$merged_at" && "$merged_at" != "null" ]]; then
+    echo "merged"
+    return 0
+  elif [[ "$state" == "CLOSED" ]]; then
+    echo "closed"
+    return 0
+  elif [[ -n "$state" ]]; then
+    echo "open"
+    return 0
+  else
+    echo "unknown"
+    return 1
+  fi
+}
+
+cleanup_worktrees() {
+  local dir manifest wt_notified wt_worktree wt_ended wt_ended_epoch wt_now_epoch wt_age wt_task_id
+  local wt_cmd wt_pr_info wt_pr_num wt_repo wt_pr_status
+
+  for dir in "$COMPLETED_DIR" "$FAILED_DIR"; do
+    for manifest in "$dir"/*.json; do
+      [[ -f "$manifest" && -s "$manifest" ]] || continue
+
+      wt_notified="$(jq -r '.notifiedAt // empty' "$manifest" 2>/dev/null || true)"
+      [[ -z "$wt_notified" ]] && continue
+
+      wt_worktree="$(jq -r '.worktree // empty' "$manifest" 2>/dev/null || true)"
+      [[ -z "$wt_worktree" || "$wt_worktree" == "null" || ! -d "$wt_worktree" ]] && continue
+
+      wt_ended="$(jq -r '.completedAt // .failedAt // empty' "$manifest" 2>/dev/null || true)"
+      if [[ -z "$wt_ended" ]]; then
+        continue
+      fi
+
+      wt_ended_epoch="$(date -d "$wt_ended" +%s 2>/dev/null || echo 0)"
+      wt_now_epoch="$(date +%s)"
+      wt_age=$((wt_now_epoch - wt_ended_epoch))
+
+      # Skip if too recent
+      if [[ "$wt_age" -lt "$_WORKTREE_CLEANUP_AGE" ]]; then
+        continue
+      fi
+
+      wt_task_id="$(jq -r '.taskId // empty' "$manifest" 2>/dev/null || true)"
+      wt_cmd="$(jq -r '.command // ""' "$manifest" 2>/dev/null || true)"
+
+      # Extract PR info and check merge status
+      wt_pr_info="$(extract_pr_info "$wt_cmd")"
+      wt_pr_num="$(echo "$wt_pr_info" | cut -d'|' -f1)"
+      wt_repo="$(echo "$wt_pr_info" | cut -d'|' -f2)"
+
+      # Pre-fetch branch name and main repo path before any removal
+      local _wt_branch _wt_git_common _wt_main
+      _wt_branch="$(git -C "$wt_worktree" branch --show-current 2>/dev/null || true)"
+      _wt_git_common="$(git -C "$wt_worktree" rev-parse --git-common-dir 2>/dev/null || true)"
+      [[ -n "$_wt_git_common" && "$_wt_git_common" != /* ]] && \
+        _wt_git_common="$(realpath "$wt_worktree/$_wt_git_common" 2>/dev/null || true)"
+      _wt_main="$(dirname "$_wt_git_common")"
+
+      # Remove a worktree and optionally its local branch.
+      _remove_wt_and_branch() {
+        local path="$1" main_repo="$2" branch="$3" force_branch="$4"
+        git -C "$main_repo" worktree remove --force "$path" 2>/dev/null || rm -rf "$path"
+        if [[ -n "$branch" && "$branch" != "master" && "$branch" != "main" ]]; then
+          if [[ "$force_branch" == "yes" ]]; then
+            git -C "$main_repo" branch -D "$branch" 2>/dev/null && \
+              echo "[cleanup] Deleted local branch (force): $branch" || true
+          else
+            git -C "$main_repo" branch -d "$branch" 2>/dev/null && \
+              echo "[cleanup] Deleted local branch (safe): $branch" || true
+          fi
+        fi
+      }
+
+      if [[ -n "$wt_pr_num" && -n "$wt_repo" ]]; then
+        wt_pr_status="$(is_pr_merged "$wt_pr_num" "$wt_repo")"
+
+        case "$wt_pr_status" in
+          merged)
+            echo "[cleanup] PR #$wt_pr_num in $wt_repo is MERGED — removing worktree for $wt_task_id: $wt_worktree"
+            _remove_wt_and_branch "$wt_worktree" "$_wt_main" "$_wt_branch" "yes"
+            ACTIONS_TAKEN=$((ACTIONS_TAKEN + 1))
+            ;;
+          closed)
+            echo "[cleanup] PR #$wt_pr_num in $wt_repo is CLOSED — removing worktree for $wt_task_id: $wt_worktree"
+            _remove_wt_and_branch "$wt_worktree" "$_wt_main" "$_wt_branch" "no"
+            ACTIONS_TAKEN=$((ACTIONS_TAKEN + 1))
+            ;;
+          open)
+            echo "[cleanup] PR #$wt_pr_num in $wt_repo is still OPEN — keeping worktree: $wt_worktree"
+            ;;
+          unknown)
+            if [[ "$wt_age" -gt 86400 ]]; then
+              echo "[cleanup] PR status unknown, task >24h old — removing worktree for $wt_task_id: $wt_worktree"
+              _remove_wt_and_branch "$wt_worktree" "$_wt_main" "$_wt_branch" "no"
+              ACTIONS_TAKEN=$((ACTIONS_TAKEN + 1))
+            fi
+            ;;
+        esac
+      else
+        if [[ "$wt_age" -gt 86400 ]]; then
+          echo "[cleanup] No PR info, task >24h old — removing worktree for $wt_task_id: $wt_worktree"
+          _remove_wt_and_branch "$wt_worktree" "$_wt_main" "$_wt_branch" "no"
+          ACTIONS_TAKEN=$((ACTIONS_TAKEN + 1))
+        fi
+      fi
+    done
+  done
+}
+
+cleanup_worktrees
+
+# --- 6b. Clean up orphaned worktrees (not in any manifest) ---
+echo "[cleanup] Checking for orphaned worktrees..."
+
+cleanup_orphaned_worktrees() {
+  local wt_list wt_path wt_branch manifest_found pr_num repo pr_status
+
+  # First, prune broken worktree references
+  git worktree prune -v 2>&1 | while read -r line; do
+    echo "[cleanup] Pruned broken worktree: $line"
+  done
+
+  # Get list of worktrees from git
+  wt_list="$(git worktree list --porcelain 2>/dev/null | grep "^worktree" | cut -d' ' -f2-)" || return
+
+  for wt_path in $wt_list; do
+    [[ -d "$wt_path" ]] || continue
+
+    # Skip the main worktree
+    if [[ "$wt_path" == "$(pwd)" ]]; then
+      continue
+    fi
+
+    # Check if this worktree is tracked in any manifest
+    manifest_found=""
+    for dir in "$ACTIVE_DIR" "$COMPLETED_DIR" "$FAILED_DIR"; do
+      for manifest in "$dir"/*.json; do
+        [[ -f "$manifest" && -s "$manifest" ]] || continue
+        local manifest_wt
+        manifest_wt="$(jq -r '.worktree // empty' "$manifest" 2>/dev/null || true)"
+        if [[ "$manifest_wt" == "$wt_path" ]]; then
+          manifest_found="$manifest"
+          break 2
+        fi
+      done
+    done
+
+    if [[ -z "$manifest_found" ]]; then
+      wt_branch="$(cd "$wt_path" 2>/dev/null && git branch --show-current 2>/dev/null || true)"
+
+      if [[ -n "$wt_branch" && "$wt_branch" != "master" && "$wt_branch" != "main" ]]; then
+        pr_num="$(echo "$wt_branch" | grep -oE '[0-9]+' | head -1)"
+
+        local origin_merged=""
+        if git rev-parse --verify "origin/$wt_branch" &>/dev/null; then
+          if git branch -r --merged origin/master 2>/dev/null | grep -q "origin/$wt_branch"; then
+            origin_merged="yes"
+          fi
+        else
+          origin_merged="deleted"
+        fi
+
+        if [[ "$origin_merged" == "yes" || "$origin_merged" == "deleted" ]]; then
+          echo "[cleanup] Orphaned worktree with merged/deleted branch '$wt_branch' — removing: $wt_path"
+          git worktree remove --force "$wt_path" 2>/dev/null || rm -rf "$wt_path"
+          if [[ -n "$wt_branch" && "$wt_branch" != "master" && "$wt_branch" != "main" ]]; then
+            git branch -d "$wt_branch" 2>/dev/null && \
+              echo "[cleanup] Deleted local branch (safe): $wt_branch" || true
+          fi
+          ACTIONS_TAKEN=$((ACTIONS_TAKEN + 1))
+        else
+          echo "[cleanup] Orphaned worktree with unmerged branch '$wt_branch' — keeping: $wt_path"
+        fi
+      fi
+    fi
+  done
+}
+
+# Run orphaned worktree cleanup from repos found in task manifests
+_cleanup_repos_checked=()
+for _dir in "$COMPLETED_DIR" "$FAILED_DIR"; do
+  for _manifest in "$_dir"/*.json; do
+    [[ -f "$_manifest" && -s "$_manifest" ]] || continue
+    local _wt
+    _wt="$(jq -r '.worktree // empty' "$_manifest" 2>/dev/null || true)"
+    [[ -z "$_wt" || "$_wt" == "null" || ! -d "$_wt" ]] && continue
+    local _main_repo
+    _main_repo="$(git -C "$_wt" rev-parse --git-common-dir 2>/dev/null || true)"
+    [[ -z "$_main_repo" ]] && continue
+    [[ "$_main_repo" != /* ]] && _main_repo="$(realpath "$_wt/$_main_repo" 2>/dev/null || true)"
+    _main_repo="$(dirname "$_main_repo")"
+    [[ -z "$_main_repo" || ! -d "$_main_repo" ]] && continue
+    # Skip if already checked
+    local _already=false
+    for _checked in "${_cleanup_repos_checked[@]:-}"; do
+      [[ "$_checked" == "$_main_repo" ]] && _already=true && break
+    done
+    [[ "$_already" == true ]] && continue
+    _cleanup_repos_checked+=("$_main_repo")
+    echo "[cleanup] Checking orphaned worktrees in: $_main_repo"
+    ( cd "$_main_repo" && cleanup_orphaned_worktrees ) || true
+  done
+done
+
+# --- 7. Clean up old audio files ---
+echo "[cleanup] Checking for old audio files..."
+
+AUDIO_SUMMARY_COUNT=$(find /tmp -maxdepth 1 -name "audio-summary-*.mp3" -o -name "audio-summary-*.wav" 2>/dev/null | wc -l)
+if [[ "$AUDIO_SUMMARY_COUNT" -gt 0 ]]; then
+  DELETED_AUDIO=$(find /tmp -maxdepth 1 \( -name "audio-summary-*.mp3" -o -name "audio-summary-*.wav" \) -mtime +1 -delete -print 2>/dev/null | wc -l)
+  if [[ "$DELETED_AUDIO" -gt 0 ]]; then
+    echo "[cleanup] Deleted $DELETED_AUDIO old audio summary file(s)"
+    ACTIONS_TAKEN=$((ACTIONS_TAKEN + 1))
+  fi
+fi
+
+INCOMING_AUDIO_COUNT=$(find "$HOME/.openclaw/media/inbound" -name "*.ogg" 2>/dev/null | wc -l)
+if [[ "$INCOMING_AUDIO_COUNT" -gt 0 ]]; then
+  DELETED_INCOMING=$(find "$HOME/.openclaw/media/inbound" -name "*.ogg" -mtime +1 -delete -print 2>/dev/null | wc -l)
+  if [[ "$DELETED_INCOMING" -gt 0 ]]; then
+    echo "[cleanup] Deleted $DELETED_INCOMING old incoming audio file(s)"
+    ACTIONS_TAKEN=$((ACTIONS_TAKEN + 1))
+  fi
+fi
+
+# --- Summary ---
+if [[ $ACTIONS_TAKEN -eq 0 ]]; then
+  echo "[cleanup] No issues found. All clear."
+else
+  echo "[cleanup] Completed with $ACTIONS_TAKEN action(s) taken."
+fi

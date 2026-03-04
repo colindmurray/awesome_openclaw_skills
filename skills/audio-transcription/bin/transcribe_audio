@@ -1,0 +1,151 @@
+#!/bin/bash
+#
+# transcribe_audio - Transcribe audio files using Gemini 2.5 Flash
+#
+# Usage:
+#   transcribe_audio [--json] <audio_file>
+#
+# Options:
+#   --json    Output as JSON with metadata
+#
+# Environment:
+#   GEMINI_API_KEY - Your Google AI Studio API key
+#
+# Examples:
+#   transcribe_audio voice.ogg
+#   transcribe_audio --json message.mp3
+
+set -euo pipefail
+
+# --- Parse arguments ---
+OUTPUT_TEXT=true
+AUDIO_FILE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json|-j)
+      OUTPUT_TEXT=false
+      shift
+      ;;
+    -*)
+      echo "Error: Unknown option $1" >&2
+      exit 1
+      ;;
+    *)
+      AUDIO_FILE="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$AUDIO_FILE" ]]; then
+  echo "Usage: transcribe_audio [--json] <audio_file>" >&2
+  exit 1
+fi
+
+if [[ ! -f "$AUDIO_FILE" ]]; then
+  echo "Error: File not found: $AUDIO_FILE" >&2
+  exit 1
+fi
+
+# --- Check API key ---
+if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+  # Try to load from secrets directory
+  secrets_dir="${OPENCLAW_SECRETS_DIR:-$HOME/.openclaw/secrets}"
+  if [[ -f "$secrets_dir/GEMINI_API_KEY" ]]; then
+    GEMINI_API_KEY="$(cat "$secrets_dir/GEMINI_API_KEY")"
+  fi
+fi
+
+if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+  echo "Error: GEMINI_API_KEY not set" >&2
+  exit 1
+fi
+
+# --- Determine mime type from extension ---
+get_mime_type() {
+  local ext="${1##*.}"
+  ext="${ext,,}"  # lowercase
+
+  case "$ext" in
+    ogg|opus)   echo "audio/ogg" ;;
+    mp3)        echo "audio/mpeg" ;;
+    wav)        echo "audio/wav" ;;
+    flac)       echo "audio/flac" ;;
+    m4a)        echo "audio/mp4" ;;
+    webm)       echo "audio/webm" ;;
+    aac)        echo "audio/aac" ;;
+    aiff|aif)   echo "audio/aiff" ;;
+    *)          echo "audio/ogg" ;;  # Default for Discord voice messages
+  esac
+}
+
+MIME_TYPE=$(get_mime_type "$AUDIO_FILE")
+
+# --- Prepare the prompt ---
+PROMPT="Transcribe this audio file completely. Provide:
+1. A full word-for-word transcription of everything spoken
+2. If the speaker is asking a question or making a request, clearly state what they want
+
+Be accurate and include all spoken content."
+
+# --- Build JSON request via temp files (avoids 128KB MAX_ARG_STRLEN kernel limit for large audio) ---
+TMPJSON=$(mktemp /tmp/transcribe_req_XXXXXX.json)
+TMPB64=$(mktemp /tmp/transcribe_b64_XXXXXX.txt)
+trap 'rm -f "$TMPJSON" "$TMPB64"' EXIT
+
+base64 -w 0 "$AUDIO_FILE" > "$TMPB64"
+
+PROMPT_VAL="$PROMPT" MIME_VAL="$MIME_TYPE" B64FILE="$TMPB64" OUTFILE="$TMPJSON" python3 << 'PYEOF'
+import json, os
+b64 = open(os.environ['B64FILE']).read().strip()
+body = {
+    "contents": [{
+        "parts": [
+            {"text": os.environ['PROMPT_VAL']},
+            {"inline_data": {"mime_type": os.environ['MIME_VAL'], "data": b64}}
+        ]
+    }]
+}
+with open(os.environ['OUTFILE'], 'w') as f:
+    json.dump(body, f)
+PYEOF
+
+# --- Call Gemini API ---
+RESPONSE=$(curl -s "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "@$TMPJSON")
+
+# --- Extract transcription ---
+TRANSCRIPTION=$(echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text // empty' 2>/dev/null)
+
+if [[ -z "$TRANSCRIPTION" ]]; then
+  # Check for error
+  ERROR=$(echo "$RESPONSE" | jq -r '.error.message // empty' 2>/dev/null)
+  if [[ -n "$ERROR" ]]; then
+    echo "Error: $ERROR" >&2
+    exit 1
+  fi
+  echo "Error: Could not extract transcription" >&2
+  echo "Response: $RESPONSE" >&2
+  exit 1
+fi
+
+# --- Output ---
+if [[ "$OUTPUT_TEXT" == "true" ]]; then
+  echo "$TRANSCRIPTION"
+else
+  # JSON output
+  MODEL_VERSION=$(echo "$RESPONSE" | jq -r '.modelVersion // "unknown"' 2>/dev/null)
+  TOKEN_COUNT=$(echo "$RESPONSE" | jq -r '.usageMetadata.totalTokenCount // 0' 2>/dev/null)
+
+  jq -n \
+    --arg transcription "$TRANSCRIPTION" \
+    --arg model "$MODEL_VERSION" \
+    --argjson tokens "$TOKEN_COUNT" \
+    '{
+      transcription: $transcription,
+      model: $model,
+      tokenCount: $tokens
+    }'
+fi

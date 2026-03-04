@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# resolve_github_account — shared library for N-account GitHub identity resolution
+#
+# Reads ~/.openclaw/github-accounts.json (or OPENCLAW_GITHUB_ACCOUNTS_FILE)
+# and provides functions to resolve owner → account and set credentials.
+#
+# Usage:
+#   source "/path/to/lib/resolve_github_account"
+#   resolve_account_for_owner "some-org"   # prints account name
+#   set_github_identity "personal"          # exports GIT_SSH_COMMAND, GH_TOKEN, etc.
+#
+# Config file format (~/.openclaw/github-accounts.json):
+# {
+#   "accounts": {
+#     "personal": {
+#       "github_username": "myuser",
+#       "ssh_host": "github-personal",
+#       "ssh_key": "~/.ssh/id_ed25519_personal",
+#       "pat_file": "~/.secrets/MY_GITHUB_PAT",
+#       "owners": ["myuser", "my-org"]
+#     }
+#   },
+#   "default_account": "personal"
+# }
+
+_GITHUB_ACCOUNTS_FILE="${OPENCLAW_GITHUB_ACCOUNTS_FILE:-$HOME/.openclaw/github-accounts.json}"
+
+# Check if config file exists
+_github_accounts_available() {
+  [[ -f "$_GITHUB_ACCOUNTS_FILE" ]]
+}
+
+# Get a field from the config
+# Usage: get_account_field <account_name> <field>
+get_account_field() {
+  local account="$1"
+  local field="$2"
+
+  if ! _github_accounts_available; then
+    echo ""
+    return 1
+  fi
+
+  local value
+  value="$(jq -r --arg acct "$account" --arg f "$field" \
+    '.accounts[$acct][$f] // empty' "$_GITHUB_ACCOUNTS_FILE" 2>/dev/null)"
+
+  # Expand ~ in paths
+  if [[ "$value" == "~/"* ]]; then
+    value="$HOME/${value#\~/}"
+  fi
+
+  echo "$value"
+}
+
+# Get the default account name
+_get_default_account() {
+  if ! _github_accounts_available; then
+    echo ""
+    return 1
+  fi
+
+  jq -r '.default_account // empty' "$_GITHUB_ACCOUNTS_FILE" 2>/dev/null
+}
+
+# List all configured account names
+list_accounts() {
+  if ! _github_accounts_available; then
+    echo "No github-accounts.json found at $_GITHUB_ACCOUNTS_FILE" >&2
+    return 1
+  fi
+
+  jq -r '.accounts | keys[]' "$_GITHUB_ACCOUNTS_FILE" 2>/dev/null
+}
+
+# Resolve an owner (GitHub username or org) to an account name
+# Returns the account name on stdout, or the default account if no match
+# Usage: account=$(resolve_account_for_owner "some-org")
+resolve_account_for_owner() {
+  local owner="$1"
+
+  if ! _github_accounts_available; then
+    echo ""
+    return 1
+  fi
+
+  # Search all accounts for one whose owners array contains this owner
+  local account
+  account="$(jq -r --arg owner "$owner" '
+    .accounts | to_entries[] |
+    select(.value.owners != null and (.value.owners | index($owner) != null)) |
+    .key
+  ' "$_GITHUB_ACCOUNTS_FILE" 2>/dev/null | head -1)"
+
+  if [[ -n "$account" ]]; then
+    echo "$account"
+    return 0
+  fi
+
+  # Fall back to default account
+  local default_account
+  default_account="$(_get_default_account)"
+  if [[ -n "$default_account" ]]; then
+    echo "$default_account"
+    return 0
+  fi
+
+  # Fall back to first account
+  list_accounts | head -1
+}
+
+# Set GitHub identity for an account
+# Exports: GIT_SSH_COMMAND, GH_TOKEN, GITHUB_TOKEN, GITHUB_ACTIVE_ACCOUNT
+# Usage: set_github_identity "personal"
+set_github_identity() {
+  local account="$1"
+
+  if [[ -z "$account" ]]; then
+    echo "Error: account name required" >&2
+    return 1
+  fi
+
+  if ! _github_accounts_available; then
+    echo "Warning: No github-accounts.json found — skipping identity setup" >&2
+    return 0
+  fi
+
+  # Verify account exists
+  local username
+  username="$(get_account_field "$account" "github_username")"
+  if [[ -z "$username" ]]; then
+    echo "Warning: Account '$account' not found in config" >&2
+    return 1
+  fi
+
+  # Set SSH key
+  local ssh_key
+  ssh_key="$(get_account_field "$account" "ssh_key")"
+  if [[ -n "$ssh_key" && -f "$ssh_key" ]]; then
+    export GIT_SSH_COMMAND="ssh -i $ssh_key -o IdentitiesOnly=yes"
+  fi
+
+  # Set PAT (GitHub token)
+  local pat_file
+  pat_file="$(get_account_field "$account" "pat_file")"
+  if [[ -n "$pat_file" && -r "$pat_file" ]]; then
+    export GH_TOKEN="$(<"$pat_file")"
+    export GITHUB_TOKEN="$GH_TOKEN"
+  fi
+
+  export GITHUB_ACTIVE_ACCOUNT="$account"
+}
+
+# Convenience: resolve owner from a git remote URL and set identity
+# Usage: resolve_and_set_identity_from_remote <workdir>
+resolve_and_set_identity_from_remote() {
+  local workdir="${1:-.}"
+
+  # Skip if GH_TOKEN already set
+  [[ -n "${GH_TOKEN:-}" ]] && return 0
+
+  if ! _github_accounts_available; then
+    return 0
+  fi
+
+  local repo_root origin_url owner account
+
+  repo_root="$(git -C "$workdir" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [[ -n "$repo_root" ]]; then
+    origin_url="$(git -C "$repo_root" remote get-url origin 2>/dev/null || true)"
+  fi
+
+  # Extract owner from URL
+  if [[ -n "$origin_url" ]]; then
+    # Handle: git@host:owner/repo.git, https://github.com/owner/repo
+    if [[ "$origin_url" =~ ^git@[^:]+:([^/]+)/ ]]; then
+      owner="${BASH_REMATCH[1]}"
+    elif [[ "$origin_url" =~ ^https?://[^/]+/([^/]+)/ ]]; then
+      owner="${BASH_REMATCH[1]}"
+    fi
+  fi
+
+  if [[ -n "$owner" ]]; then
+    account="$(resolve_account_for_owner "$owner")"
+  else
+    account="$(_get_default_account)"
+  fi
+
+  if [[ -n "$account" ]]; then
+    set_github_identity "$account"
+  fi
+}
