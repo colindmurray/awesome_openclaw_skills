@@ -12,6 +12,18 @@ for _d in "$HOME/.local/bin" "$HOME/bin"; do
 done
 export PATH
 
+# --- Load cross-platform helpers ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for _ph in \
+  "${OPENCLAW_DIR:-$HOME/.openclaw}/lib/platform_helpers" \
+  "$SCRIPT_DIR/../../../lib/platform_helpers" \
+; do
+  if [[ -f "$_ph" ]]; then
+    source "$_ph"
+    break
+  fi
+done
+
 TASKS_DIR="$HOME/.openclaw/tasks"
 ACTIVE_DIR="$TASKS_DIR/active"
 COMPLETED_DIR="$TASKS_DIR/completed"
@@ -62,16 +74,16 @@ format_duration() {
 
 # --- Helper: get system memory info ---
 get_memory_info() {
-  if [[ ! -f /proc/meminfo ]]; then
+  if ! declare -f get_available_memory_mb &>/dev/null; then
     echo ""
     return
   fi
   local mem_total mem_avail usage_pct
-  mem_total="$(grep '^MemTotal:' /proc/meminfo | awk '{print $2}')"
-  mem_avail="$(grep '^MemAvailable:' /proc/meminfo | awk '{print $2}')"
-  if [[ -n "$mem_total" && -n "$mem_avail" && "$mem_total" -gt 0 ]]; then
+  mem_total="$(get_total_memory_mb)"
+  mem_avail="$(get_available_memory_mb)"
+  if [[ "$mem_total" -gt 0 ]]; then
     usage_pct=$(( (mem_total - mem_avail) * 100 / mem_total ))
-    echo "${usage_pct}% used ($(( mem_avail / 1024 ))MB free of $(( mem_total / 1024 ))MB)"
+    echo "${usage_pct}% used (${mem_avail}MB free of ${mem_total}MB)"
   fi
 }
 
@@ -184,13 +196,21 @@ check_one_task() {
   local runtime_str="unknown"
   if [[ -n "$started_at" ]]; then
     local start_epoch
-    start_epoch="$(date -d "$started_at" +%s 2>/dev/null || echo 0)"
+    start_epoch="$(parse_date_to_epoch "$started_at" 2>/dev/null || echo 0)"
     local now_epoch
     now_epoch="$(date +%s)"
     if [[ "$start_epoch" -gt 0 ]]; then
       runtime_secs=$((now_epoch - start_epoch))
       runtime_str="$(format_duration "$runtime_secs")"
     fi
+  fi
+
+  # --- Per-task memory (RSS) ---
+  local task_rss_mb="?"
+  if [[ "$pid_alive" == true ]] && declare -f get_pid_rss_kb &>/dev/null; then
+    local _rss_kb
+    _rss_kb="$(get_pid_rss_kb "$pid")"
+    [[ "$_rss_kb" -gt 0 ]] && task_rss_mb="$(( _rss_kb / 1024 ))MB"
   fi
 
   # --- Output analysis ---
@@ -201,12 +221,12 @@ check_one_task() {
   local last_output=""
 
   if [[ -n "$output_file" && -f "$output_file" ]]; then
-    output_size="$(stat -c%s "$output_file" 2>/dev/null || echo 0)"
+    output_size="$(get_file_size_bytes "$output_file")"
     output_lines="$(wc -l < "$output_file" 2>/dev/null || echo 0)"
 
     # Freshness check
     local mtime
-    mtime="$(stat -c%Y "$output_file" 2>/dev/null || echo 0)"
+    mtime="$(get_file_mtime_epoch "$output_file")"
     local now_epoch
     now_epoch="$(date +%s)"
     local age=$((now_epoch - mtime))
@@ -232,7 +252,7 @@ check_one_task() {
 
   if [[ "$type" == "coding-agent" && -n "$stream_file" && -f "$stream_file" ]]; then
     local stream_size
-    stream_size="$(stat -c%s "$stream_file" 2>/dev/null || echo 0)"
+    stream_size="$(get_file_size_bytes "$stream_file")"
 
     if [[ "$stream_size" -gt 0 ]] && command -v jq &>/dev/null; then
       # Count tool_use events
@@ -314,6 +334,7 @@ check_one_task() {
       --arg gitDiffStat "$git_diff_stat" \
       --arg exitCode "${exit_code:-}" \
       --arg note "${note:-}" \
+      --arg taskRss "$task_rss_mb" \
       --arg memoryInfo "$mem_info" \
       '{
         taskId: $taskId,
@@ -350,7 +371,8 @@ check_one_task() {
         exitCode: (if $exitCode != "" then ($exitCode | tonumber) else null end),
         note: (if $note != "" then $note else null end),
         system: {
-          memory: (if $memoryInfo != "" then $memoryInfo else null end)
+          memory: (if $memoryInfo != "" then $memoryInfo else null end),
+          taskRss: (if $taskRss != "?" then $taskRss else null end)
         }
       }'
     return
@@ -364,7 +386,7 @@ check_one_task() {
   echo "Status:  $status"
   echo "Health:  $health"
   echo "Runtime: $runtime_str"
-  echo "PID:     ${pid:-none}$(if [[ "$pid_alive" == true ]]; then echo " (alive)"; else echo " (dead)"; fi)"
+  echo "PID:     ${pid:-none}$(if [[ "$pid_alive" == true ]]; then echo " (alive, RSS: $task_rss_mb)"; else echo " (dead)"; fi)"
 
   # Monitor info
   if [[ -n "$monitor_pid_val" && "$monitor_pid_val" != "null" ]]; then
@@ -382,7 +404,7 @@ check_one_task() {
   fi
 
   echo "───────────────────────────────────────────────────"
-  echo "Output:  $output_lines lines, $(numfmt --to=iec "$output_size" 2>/dev/null || echo "${output_size}B")"
+  echo "Output:  $output_lines lines, $(format_bytes_human "$output_size")"
   echo "Fresh:   $output_freshness"
 
   if [[ "$output_stale" == true ]]; then

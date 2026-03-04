@@ -132,6 +132,7 @@ When a task fails and you decide to retry:
 | `--workdir PATH` | Working directory for the process (default: current dir) |
 | `--worktree PATH` | Git worktree path (for agent git progress tracking) |
 | `--prompt-file PATH` | File containing the prompt (piped to agent stdin) |
+| `--force` | Bypass the pre-launch memory gate (use with caution) |
 
 ### Metadata
 
@@ -198,10 +199,36 @@ Three layers detect task death:
 2. **`monitor_task`** — cron every 5 min, scans all active tasks, checks memory
 3. **`cleanup_tasks`** — heartbeat every 30 min, safety net, prunes old files
 
-## Memory Constraints
+## Memory Safety
 
-Coding agents use significant RAM (~1-2GB each). Before launching concurrent agents:
-- Check memory with `check_task --all --json`
+### Pre-launch memory gate
+
+Coding agents use significant RAM (~1-2GB each). The launcher **automatically refuses** to start a coding agent if system available memory is below 1.5GB (default). This prevents cascading OOM kills that take down all running agents.
+
+- **Threshold:** `OPENCLAW_MIN_MEMORY_MB` env var (default: `1536` = 1.5GB)
+- **Bypass:** `--force` flag (use with caution)
+- The gate checks `/proc/meminfo` MemAvailable and reports active coding agent count
+
+### Periodic memory logging
+
+The `monitor_task` cron (every 5 min) logs memory snapshots to each active coding agent's output file:
+```
+[memory] 2026-03-04T15:00:00Z | system: 2048MB free of 7680MB | task RSS: 890MB | pid: 12345
+```
+These breadcrumbs enable post-mortem analysis of memory growth leading to OOM kills.
+
+### OOM detection
+
+Death detection uses multiple signals (not just `dmesg`, which often requires root):
+1. Memory pressure at detection time (>90% usage = likely OOM)
+2. `journalctl --user` for OOM messages
+3. `dmesg` as fallback (if readable)
+4. Exit code 137 = SIGKILL = almost always OOM killer
+
+### Best practice
+
+Before launching concurrent agents:
+- Check memory with `check_task --all --json` (includes per-task RSS and system memory)
 - On low-memory systems, run agents sequentially
 
 ---
