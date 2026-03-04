@@ -70,7 +70,7 @@ COMMAND=""
 SUMMARY=""
 SESSION_ID=""
 CHANNEL=""
-TARGET=""              # Discord channel/group target ID
+TARGET=""              # Chat channel/group target ID
 TYPE="command"         # command | coding-agent
 AGENT=""               # claude | gemini | codex
 TIMEOUT=""             # seconds, empty = no timeout
@@ -131,10 +131,35 @@ STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 EXEC_COMMAND="$COMMAND"
 
 if [[ "$TYPE" == "coding-agent" ]]; then
+  # --- Resolve billing mode for this agent ---
+  # Priority: OPENCLAW_UNSET_ANTHROPIC_KEY env var > coding-agents.json > default (api_key)
+  _resolve_agent_billing() {
+    local agent_name="$1"
+    local config_file="${OPENCLAW_CODING_AGENTS_FILE:-${OPENCLAW_DIR:-$HOME/.openclaw}/coding-agents.json}"
+    if [[ -f "$config_file" ]] && command -v jq &>/dev/null; then
+      jq -r ".agents.\"$agent_name\".billing // \"api_key\"" "$config_file" 2>/dev/null || echo "api_key"
+    else
+      echo "api_key"
+    fi
+  }
+
   case "$AGENT" in
     claude)
-      # Optionally unset ANTHROPIC_API_KEY to force OAuth subscription billing
-      if [[ "${OPENCLAW_UNSET_ANTHROPIC_KEY:-false}" == "true" ]]; then
+      # Determine if we should unset ANTHROPIC_API_KEY for subscription billing
+      # Explicit env var takes priority over config file
+      local use_subscription=false
+      if [[ "${OPENCLAW_UNSET_ANTHROPIC_KEY:-}" == "true" ]]; then
+        use_subscription=true
+      elif [[ -z "${OPENCLAW_UNSET_ANTHROPIC_KEY:-}" ]]; then
+        # No env var set — check config file
+        local billing_mode
+        billing_mode="$(_resolve_agent_billing claude)"
+        if [[ "$billing_mode" == "subscription" ]]; then
+          use_subscription=true
+        fi
+      fi
+
+      if [[ "$use_subscription" == true ]]; then
         EXEC_COMMAND="env -u ANTHROPIC_API_KEY claude -p --dangerously-skip-permissions --output-format stream-json --verbose"
       else
         EXEC_COMMAND="claude -p --dangerously-skip-permissions --output-format stream-json --verbose"
@@ -218,7 +243,7 @@ jq -n \
   }' > "$MANIFEST"
 
 # --- Notification helper ---
-# Sends a Discord notification via openclaw CLI. Fire-and-forget.
+# Sends a notification via openclaw CLI. Fire-and-forget.
 # Uses resolve_channel to determine the target.
 notify() {
   local msg="$1"
@@ -248,7 +273,7 @@ notify() {
 # --- Monitor PID watchdog ---
 # Runs as a sibling background process. Survives if the task subshell dies (OOM, SIGKILL).
 # Checks PID liveness every 120s. If PID dies unexpectedly, moves manifest to failed/
-# and sends Discord notification.
+# and sends a notification.
 monitor_pid() {
   local watch_pid="$1"
   local task_id="$2"
@@ -310,7 +335,7 @@ monitor_pid() {
         "$manifest" > "$FAILED_DIR/$task_id.json" 2>/dev/null || true
       rm -f "$manifest"
 
-      # Send Discord notification
+      # Send notification
       local notify_msg="**Task died unexpectedly**
 - **Summary:** ${summary}
 - **Task ID:** ${task_id}
@@ -418,7 +443,7 @@ ${output_tail}
 \`\`\`"
   fi
 
-  # Send Discord notification
+  # Send notification
   notify "$notify_msg"
 
   # Also fire system event to wake AI for interpretation

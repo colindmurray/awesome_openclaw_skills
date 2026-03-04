@@ -1,0 +1,29 @@
+{
+  "agents": {
+    "claude": {
+      "enabled": true,
+      "billing": "api_key",
+      "notes": "billing: 'api_key' uses ANTHROPIC_API_KEY; 'subscription' unsets it to force OAuth"
+    },
+    "codex": {
+      "enabled": true,
+      "billing": "api_key",
+      "notes": "billing: 'api_key' uses OPENAI_API_KEY"
+    },
+    "gemini": {
+      "enabled": false,
+      "billing": "api_key",
+      "notes": "billing: 'api_key' uses GEMINI_API_KEY"
+    },
+    "opencode": {
+      "enabled": false,
+      "billing": "api_key"
+    },
+    "pi": {
+      "enabled": false,
+      "billing": "api_key"
+    }
+  },
+  "preference_order": ["claude", "codex"],
+  "default_agent": "claude"
+}

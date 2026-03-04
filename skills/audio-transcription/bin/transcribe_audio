@@ -76,7 +76,7 @@ get_mime_type() {
     webm)       echo "audio/webm" ;;
     aac)        echo "audio/aac" ;;
     aiff|aif)   echo "audio/aiff" ;;
-    *)          echo "audio/ogg" ;;  # Default for Discord voice messages
+    *)          echo "audio/ogg" ;;  # Default for voice messages
   esac
 }
 

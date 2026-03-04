@@ -95,8 +95,6 @@ Coding agents use significant RAM (~1-2GB each). Before launching concurrent age
 | Auto-edit | `claude -p --permission-mode acceptEdits "prompt"` |
 | Full auto (headless) | `claude -p --dangerously-skip-permissions "prompt"` |
 
-> **Subscription billing note:** If you have both an API key and an OAuth subscription, Claude Code prioritizes the API key. Set `OPENCLAW_UNSET_ANTHROPIC_KEY=true` to force subscription billing in background tasks, or prefix commands with `env -u ANTHROPIC_API_KEY`.
-
 ### Codex CLI
 
 | Flag | Effect |
@@ -128,6 +126,53 @@ pi --provider openai --model gpt-4o-mini -p '...' # Custom provider
 ```bash
 opencode run 'Your task'
 ```
+
+---
+
+## Configuration
+
+Configure agent preferences and billing in `~/.openclaw/coding-agents.json`. The installer creates this interactively, or copy the example:
+
+```bash
+cp config/coding-agents.example.json ~/.openclaw/coding-agents.json
+```
+
+### Config Format
+
+```json
+{
+  "agents": {
+    "claude": { "enabled": true, "billing": "subscription" },
+    "codex": { "enabled": true, "billing": "api_key" },
+    "gemini": { "enabled": false, "billing": "api_key" }
+  },
+  "preference_order": ["claude", "codex"],
+  "default_agent": "claude"
+}
+```
+
+### Fields
+
+| Field | Description |
+|-------|-------------|
+| `agents.<name>.enabled` | Whether this agent is available for use |
+| `agents.<name>.billing` | `api_key` (default) or `subscription` — controls how the agent authenticates |
+| `preference_order` | Ordered list of agents to try (primary, backup, third choice) |
+| `default_agent` | Which agent to use when none is specified |
+
+### Billing Modes
+
+- **`api_key`** (default) — Uses the standard API key environment variable (e.g., `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`)
+- **`subscription`** — For agents that support OAuth/subscription billing. For Claude, this unsets `ANTHROPIC_API_KEY` so Claude Code falls back to OAuth subscription billing.
+
+The billing mode can also be overridden per-invocation with `OPENCLAW_UNSET_ANTHROPIC_KEY=true|false`.
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OPENCLAW_CODING_AGENTS_FILE` | `~/.openclaw/coding-agents.json` | Path to the coding agent config |
+| `OPENCLAW_UNSET_ANTHROPIC_KEY` | (unset) | Override Claude billing: `true` forces subscription, `false` forces API key |
 
 ---
 

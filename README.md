@@ -79,6 +79,16 @@ echo "your-elevenlabs-key" > ~/.openclaw/secrets/ELEVENLABS_API_KEY  # optional
 
 Keys are also read from environment variables if set. At minimum, `GEMINI_API_KEY` is required for audio features.
 
+### Coding Agent Preferences
+
+Configure which coding agents you use and how they authenticate. The installer prompts for this interactively, or copy the example:
+
+```bash
+cp config/coding-agents.example.json ~/.openclaw/coding-agents.json
+```
+
+Set your preferred agent, backup agents, and billing mode (API key vs subscription) per agent. See `skills/coding-agent/SKILL.md` for full documentation.
+
 ### Cron Monitoring (Optional)
 
 For automated task monitoring, add cron entries from `examples/monitor.crontab`:
@@ -133,6 +143,7 @@ awesome_openclaw_skills/
 │       └── handler.js
 ├── config/
 │   ├── github-accounts.example.json
+│   ├── coding-agents.example.json
 │   └── secrets.example/
 │       ├── OPENAI_API_KEY
 │       ├── GEMINI_API_KEY

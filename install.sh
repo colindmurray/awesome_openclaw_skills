@@ -252,6 +252,167 @@ prompt_secrets_setup() {
   fi
 }
 
+prompt_coding_agent_setup() {
+  local config_file="$TARGET_DIR/coding-agents.json"
+
+  if [[ -f "$config_file" ]]; then
+    echo -e "  ${YELLOW}Existing${NC} coding-agents.json found — skipping setup"
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" == true ]]; then
+    echo ""
+    echo -e "  ${BLUE}[dry-run]${NC} Would prompt to configure coding agents: $config_file"
+    return 0
+  fi
+
+  # Skip interactive prompt if not a terminal
+  if [[ ! -t 0 ]]; then
+    echo ""
+    echo -e "${YELLOW}Note:${NC} Coding agent preferences can be configured in $config_file"
+    echo -e "  Copy the example: cp ${SCRIPT_DIR}/config/coding-agents.example.json $config_file"
+    return 0
+  fi
+
+  echo ""
+  echo -e "${BOLD}Coding Agent Configuration${NC}"
+  echo ""
+  echo -e "  Available agents: ${CYAN}claude${NC}, ${CYAN}codex${NC}, ${CYAN}gemini${NC}, ${CYAN}opencode${NC}, ${CYAN}pi${NC}"
+  echo ""
+
+  # --- Primary agent ---
+  local primary=""
+  while [[ -z "$primary" ]]; do
+    read -rp "  Primary coding agent [claude/codex/gemini/opencode/pi]: " primary
+    primary="${primary,,}"  # lowercase
+    case "$primary" in
+      claude|codex|gemini|opencode|pi) ;;
+      *) echo -e "  ${RED}Invalid agent.${NC} Choose: claude, codex, gemini, opencode, pi"; primary="" ;;
+    esac
+  done
+
+  # --- Primary billing ---
+  local primary_billing="api_key"
+  read -rp "  Billing for $primary — api_key or subscription? [api_key]: " primary_billing_input
+  primary_billing_input="${primary_billing_input,,}"
+  case "$primary_billing_input" in
+    subscription) primary_billing="subscription" ;;
+    *) primary_billing="api_key" ;;
+  esac
+
+  # --- Backup agent ---
+  local backup=""
+  local backup_billing="api_key"
+  read -rp "  Backup agent (or press Enter to skip): " backup
+  backup="${backup,,}"
+
+  if [[ -n "$backup" ]]; then
+    case "$backup" in
+      claude|codex|gemini|opencode|pi)
+        if [[ "$backup" == "$primary" ]]; then
+          echo -e "  ${YELLOW}Backup is same as primary — skipping${NC}"
+          backup=""
+        else
+          read -rp "  Billing for $backup — api_key or subscription? [api_key]: " backup_billing_input
+          backup_billing_input="${backup_billing_input,,}"
+          case "$backup_billing_input" in
+            subscription) backup_billing="subscription" ;;
+            *) backup_billing="api_key" ;;
+          esac
+        fi
+        ;;
+      "")
+        ;;
+      *)
+        echo -e "  ${YELLOW}Unknown agent '$backup' — skipping backup${NC}"
+        backup=""
+        ;;
+    esac
+  fi
+
+  # --- Third agent ---
+  local third=""
+  local third_billing="api_key"
+  if [[ -n "$backup" ]]; then
+    read -rp "  Third-choice agent (or press Enter to skip): " third
+    third="${third,,}"
+
+    if [[ -n "$third" ]]; then
+      case "$third" in
+        claude|codex|gemini|opencode|pi)
+          if [[ "$third" == "$primary" || "$third" == "$backup" ]]; then
+            echo -e "  ${YELLOW}Already selected — skipping${NC}"
+            third=""
+          else
+            read -rp "  Billing for $third — api_key or subscription? [api_key]: " third_billing_input
+            third_billing_input="${third_billing_input,,}"
+            case "$third_billing_input" in
+              subscription) third_billing="subscription" ;;
+              *) third_billing="api_key" ;;
+            esac
+          fi
+          ;;
+        "")
+          ;;
+        *)
+          echo -e "  ${YELLOW}Unknown agent '$third' — skipping${NC}"
+          third=""
+          ;;
+      esac
+    fi
+  fi
+
+  # --- Build preference order ---
+  local pref_order="\"$primary\""
+  [[ -n "$backup" ]] && pref_order="$pref_order, \"$backup\""
+  [[ -n "$third" ]] && pref_order="$pref_order, \"$third\""
+
+  # --- Build agents JSON entries ---
+  local all_agents=("claude" "codex" "gemini" "opencode" "pi")
+  local agents_json=""
+
+  for agent in "${all_agents[@]}"; do
+    local enabled="false"
+    local billing="api_key"
+
+    if [[ "$agent" == "$primary" ]]; then
+      enabled="true"
+      billing="$primary_billing"
+    elif [[ "$agent" == "$backup" ]]; then
+      enabled="true"
+      billing="$backup_billing"
+    elif [[ "$agent" == "$third" ]]; then
+      enabled="true"
+      billing="$third_billing"
+    fi
+
+    if [[ -n "$agents_json" ]]; then
+      agents_json="$agents_json,"
+    fi
+    agents_json="$agents_json
+    \"$agent\": {
+      \"enabled\": $enabled,
+      \"billing\": \"$billing\"
+    }"
+  done
+
+  # --- Write config ---
+  cat > "$config_file" <<AGENTEOF
+{
+  "agents": {$agents_json
+  },
+  "preference_order": [$pref_order],
+  "default_agent": "$primary"
+}
+AGENTEOF
+
+  echo ""
+  echo -e "  ${GREEN}Created${NC} $config_file"
+  echo -e "  Primary: ${BOLD}$primary${NC} ($primary_billing)"
+  [[ -n "$backup" ]] && echo -e "  Backup:  ${BOLD}$backup${NC} ($backup_billing)"
+  [[ -n "$third" ]] && echo -e "  Third:   ${BOLD}$third${NC} ($third_billing)"
+}
+
 uninstall_skill() {
   local name="$1"
   local dest="$TARGET_DIR/skills/$name"
@@ -456,6 +617,7 @@ echo -e "${BOLD}Installing skills...${NC}"
 
 needs_task_dirs=false
 needs_audio_secrets=false
+needs_coding_agent_setup=false
 
 for skill in "${SELECTED_SKILLS[@]}"; do
   name="$(get_field "$skill" 2)"
@@ -469,6 +631,7 @@ for skill in "${SELECTED_SKILLS[@]}"; do
   case "$name" in
     long-running-task) needs_task_dirs=true ;;
     audio-summary|audio-transcription) needs_audio_secrets=true ;;
+    coding-agent) needs_coding_agent_setup=true ;;
   esac
 done
 
@@ -495,6 +658,10 @@ fi
 
 if [[ "$needs_audio_secrets" == true ]]; then
   prompt_secrets_setup
+fi
+
+if [[ "$needs_coding_agent_setup" == true ]]; then
+  prompt_coding_agent_setup
 fi
 
 # --- Config file check ---

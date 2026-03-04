@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# resolve_channel — resolve Discord notification target ID
+# resolve_channel — resolve notification target ID
 #
 # Priority: $1 argument > OPENCLAW_NOTIFY_TARGET env > openclaw.json heartbeat.to
 # Usage: CHANNEL_ID=$(resolve_channel [explicit_target])
