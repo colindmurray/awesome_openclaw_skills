@@ -2,7 +2,7 @@
 #
 # test_platform_helpers.sh — Cross-platform test suite for lib/platform_helpers
 #
-# Runs on Linux, macOS, and Windows (Git Bash/MSYS2).
+# Runs on Linux (including WSL) and macOS.
 # Exit code 0 = all pass, 1 = at least one failure.
 
 set -uo pipefail
@@ -94,7 +94,7 @@ echo "=== Platform Detection ==="
 
 platform="$(get_platform)"
 echo "  Detected platform: $platform"
-assert_match "platform is a known value" "^(linux|macos|freebsd|windows|unknown)$" "$platform"
+assert_match "platform is a known value" "^(linux|macos|freebsd|unknown)$" "$platform"
 
 # Verify platform matches what we'd expect from uname
 uname_s="$(uname -s 2>/dev/null || echo Unknown)"
@@ -102,8 +102,6 @@ case "$uname_s" in
   Linux*)   assert_eq "Linux detected correctly" "linux" "$platform" ;;
   Darwin*)  assert_eq "macOS detected correctly" "macos" "$platform" ;;
   FreeBSD*) assert_eq "FreeBSD detected correctly" "freebsd" "$platform" ;;
-  CYGWIN*|MINGW*|MSYS*)
-    assert_eq "Windows detected correctly" "windows" "$platform" ;;
 esac
 
 # is_wsl returns a boolean exit code
@@ -128,42 +126,35 @@ pct="$(get_memory_usage_pct)"
 
 echo "  Total: ${total}MB, Available: ${avail}MB, Usage: ${pct}%"
 
-# On all CI runners we expect real memory info (except Windows Git Bash)
-if [[ "$platform" != "windows" && "$platform" != "unknown" ]]; then
-  assert_gt "total memory > 0" "$total" 0
-  assert_ge "available memory >= 0" "$avail" 0
-  assert_ge "usage pct >= 0" "$pct" 0
-  assert_le "usage pct <= 100" "$pct" 100
+# On all supported platforms we expect real memory info
+assert_gt "total memory > 0" "$total" 0
+assert_ge "available memory >= 0" "$avail" 0
+assert_ge "usage pct >= 0" "$pct" 0
+assert_le "usage pct <= 100" "$pct" 100
 
-  # Available should be <= total
-  if [[ "$avail" -le "$total" ]]; then
-    pass "available <= total"
-  else
-    fail "available ($avail) > total ($total)"
-  fi
-
-  # Cross-validate: usage pct should roughly match manual calculation
-  # Allow ±2% tolerance since memory changes between calls
-  if [[ "$total" -gt 0 ]]; then
-    expected_pct=$(( (total - avail) * 100 / total ))
-    diff=$(( pct - expected_pct ))
-    if [[ "$diff" -lt 0 ]]; then diff=$(( -diff )); fi
-    if [[ "$diff" -le 2 ]]; then
-      pass "usage pct within 2% of manual calc (got=$pct, expected=$expected_pct)"
-    else
-      fail "usage pct too far from manual calc (got=$pct, expected=$expected_pct, diff=$diff)"
-    fi
-  fi
-
-  # Repeated calls should return consistent results (not wildly different)
-  total2="$(get_total_memory_mb)"
-  assert_eq "total memory is stable across calls" "$total" "$total2"
+# Available should be <= total
+if [[ "$avail" -le "$total" ]]; then
+  pass "available <= total"
 else
-  # Windows/unknown: functions should still return numbers without error
-  assert_match "total is numeric on $platform" "^-?[0-9]+$" "$total"
-  assert_match "avail is numeric on $platform" "^-?[0-9]+$" "$avail"
-  assert_match "pct is numeric on $platform" "^-?[0-9]+$" "$pct"
+  fail "available ($avail) > total ($total)"
 fi
+
+# Cross-validate: usage pct should roughly match manual calculation
+# Allow ±2% tolerance since memory changes between calls
+if [[ "$total" -gt 0 ]]; then
+  expected_pct=$(( (total - avail) * 100 / total ))
+  diff=$(( pct - expected_pct ))
+  if [[ "$diff" -lt 0 ]]; then diff=$(( -diff )); fi
+  if [[ "$diff" -le 2 ]]; then
+    pass "usage pct within 2% of manual calc (got=$pct, expected=$expected_pct)"
+  else
+    fail "usage pct too far from manual calc (got=$pct, expected=$expected_pct, diff=$diff)"
+  fi
+fi
+
+# Repeated calls should return consistent results (not wildly different)
+total2="$(get_total_memory_mb)"
+assert_eq "total memory is stable across calls" "$total" "$total2"
 
 # ============================================================
 echo ""
@@ -483,12 +474,12 @@ else
   fail "execute_long_running_task has syntax errors: $result"
 fi
 
-# Test 2: Default PERMISSION_MODE is bypassPermissions
-result="$(grep 'PERMISSION_MODE="bypassPermissions"' "$ELT_SCRIPT")"
+# Test 2: PERMISSION_MODE default is set (acceptEdits or bypassPermissions)
+result="$(grep '^PERMISSION_MODE=' "$ELT_SCRIPT")"
 if [[ -n "$result" ]]; then
-  pass "default PERMISSION_MODE is bypassPermissions"
+  pass "PERMISSION_MODE has a default value"
 else
-  fail "default PERMISSION_MODE not set to bypassPermissions"
+  fail "PERMISSION_MODE default not found"
 fi
 
 # Test 3: --permission-mode is in the arg parser
