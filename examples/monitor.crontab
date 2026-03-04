@@ -4,8 +4,8 @@
 # Replace /home/YOUR_USER with your actual home directory.
 
 # Monitor active tasks every 5 minutes — detects dead PIDs, memory pressure, stale output
-*/5 * * * * /home/YOUR_USER/.openclaw/skills/long-running-task/bin/monitor_task --channel discord >> /home/YOUR_USER/.openclaw/logs/monitor.log 2>&1
+*/5 * * * * /home/YOUR_USER/.openclaw/skills/long-running-task/bin/monitor_task --channel YOUR_CHANNEL >> /home/YOUR_USER/.openclaw/logs/monitor.log 2>&1
 
 # Optional: cleanup tasks every 30 minutes — prunes old manifests, detects missed failures
 # This is also triggered by HEARTBEAT.md, so only add if not using the heartbeat system.
-# */30 * * * * /home/YOUR_USER/.openclaw/skills/long-running-task/bin/cleanup_tasks --channel discord >> /home/YOUR_USER/.openclaw/logs/cleanup.log 2>&1
+# */30 * * * * /home/YOUR_USER/.openclaw/skills/long-running-task/bin/cleanup_tasks --channel YOUR_CHANNEL >> /home/YOUR_USER/.openclaw/logs/cleanup.log 2>&1

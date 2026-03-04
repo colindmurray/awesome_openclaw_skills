@@ -88,7 +88,7 @@ const handler = async (event) => {
     lines.push(flagParts.join(' '));
     lines.push('```');
     lines.push('');
-    lines.push('This ensures the task sends Discord notifications to the correct channel when it starts, completes, fails, or dies unexpectedly.');
+    lines.push('This ensures the task sends notifications to the correct channel when it starts, completes, fails, or dies unexpectedly.');
   }
 
   event.context.bootstrapFiles.push({

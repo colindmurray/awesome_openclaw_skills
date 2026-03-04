@@ -107,11 +107,6 @@ execute_long_running_task \
 4. **Specify output format** — "Write a summary to /tmp/results.md when done"
 5. **Reference existing patterns** — "Follow the same pattern as src/api/users.ts"
 
-## Agent Selection Guide
+## Agent Selection
 
-| Task Type | Recommended Agent | Why |
-|-----------|------------------|-----|
-| Deep reasoning, complex refactors | Claude | Best at nuanced reasoning |
-| Quick fixes, batch operations | Codex | Fast execution |
-| Multi-language, Google ecosystem | Gemini | Broad language support |
-| Simple tasks, fallback | Any available | When primary is rate-limited |
+Choose any supported agent (`--agent claude`, `--agent codex`, `--agent gemini`) based on your preference and availability. All agents support the same delegation patterns above. Use `check_task --all --json` to check memory before launching parallel agents.

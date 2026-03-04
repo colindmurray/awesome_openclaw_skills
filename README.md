@@ -20,7 +20,7 @@ The interactive installer lets you pick which skills to install. Use `--all` to 
 
 | Skill | Category | Description |
 |-------|----------|-------------|
-| **long-running-task** | Task Management | Background task execution with PID monitoring, stall detection, and Discord notifications |
+| **long-running-task** | Task Management | Background task execution with PID monitoring, stall detection, and notifications |
 | **coding-agent** | Task Management | AI coding agent delegation patterns with multi-agent fallback strategy |
 | **check-on-task** | Task Management | Task status checker with deep agent analysis (phase detection, git progress, hang detection) |
 | **audio-summary** | Audio Processing | Text-to-speech with multi-provider fallback (Gemini → OpenAI → ElevenLabs) |
@@ -85,7 +85,7 @@ For automated task monitoring, add cron entries from `examples/monitor.crontab`:
 
 ```bash
 # Monitor active tasks every 5 minutes
-*/5 * * * * ~/.openclaw/skills/long-running-task/bin/monitor_task --channel discord >> ~/.openclaw/logs/monitor.log 2>&1
+*/5 * * * * ~/.openclaw/skills/long-running-task/bin/monitor_task --channel YOUR_CHANNEL >> ~/.openclaw/logs/monitor.log 2>&1
 ```
 
 ## Directory Structure

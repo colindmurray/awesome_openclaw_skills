@@ -1,6 +1,6 @@
 ---
 name: audio-transcription
-description: Transcribe Discord voice messages and audio files using Gemini's multimodal API. Automatically handles OGG/Opus format from Discord, extracts text content, and provides actionable summaries.
+description: Transcribe voice messages and audio files using Gemini's multimodal API. Automatically handles OGG/Opus format, extracts text content, and provides actionable summaries.
 metadata:
   openclaw:
     emoji: 🎙️
@@ -11,11 +11,11 @@ metadata:
 
 # Audio Transcription Skill
 
-Transcribes Discord voice messages and audio files using Gemini's multimodal API.
+Transcribes voice messages and audio files using Gemini's multimodal API.
 
 ## When to Use
 
-- User sends a Discord voice message (.ogg file)
+- User sends a voice message (.ogg file)
 - User asks to transcribe an audio file
 - User wants to know what was said in a voice memo
 
@@ -31,7 +31,7 @@ Transcribes Discord voice messages and audio files using Gemini's multimodal API
 
 ## How It Works
 
-1. **Receives audio file** (typically .ogg from Discord)
+1. **Receives audio file** (e.g., .ogg voice message)
 2. **Converts to base64** inline
 3. **Sends to Gemini 2.5 Flash** API
 4. **Returns transcription** with optional summary
@@ -40,7 +40,7 @@ Transcribes Discord voice messages and audio files using Gemini's multimodal API
 
 | Format | MIME Type | Notes |
 |--------|-----------|-------|
-| OGG/Opus | `audio/ogg` | Discord voice messages |
+| OGG/Opus | `audio/ogg` | Voice messages (Discord, Telegram, etc.) |
 | MP3 | `audio/mpeg` | Standard audio |
 | WAV | `audio/wav` | Uncompressed audio |
 | FLAC | `audio/flac` | Lossless audio |
@@ -49,7 +49,7 @@ Transcribes Discord voice messages and audio files using Gemini's multimodal API
 
 ## Usage in Conversations
 
-When you receive a Discord voice message:
+When you receive a voice message:
 
 1. The audio file is saved to `~/.openclaw/media/inbound/`
 2. Run the transcription script:
@@ -62,7 +62,7 @@ When you receive a Discord voice message:
 ## Example
 
 ```bash
-# Transcribe a Discord voice message
+# Transcribe a voice message
 TRANSCRIPT=$(~/.openclaw/skills/audio-transcription/bin/transcribe_audio \
   ~/.openclaw/media/inbound/abc123.ogg)
 
@@ -100,7 +100,7 @@ Returns:
 - Check the key hasn't expired
 
 ### "Audio format not supported"
-- Gemini supports OGG/Opus natively for Discord voice messages
+- Gemini supports OGG/Opus natively (common format for voice messages)
 - For other formats, ensure the mime type is correct
 
 ### "Argument list too long" (exit 126)

@@ -44,9 +44,9 @@ The `--purpose` flag determines where the repo is cloned:
 
 | Purpose | Directory | When to Use |
 |---------|-----------|-------------|
-| `contributor` (default) | `~/Projects/<repo>` | User intends to contribute, push commits, open PRs |
-| `external` | `~/external-github-repos/<repo>` | Non-temporary reference repo, reading/learning, not contributing |
-| `temporary` | `/tmp/github/<repo>` | Quick investigation, throwaway, will be deleted soon |
+| `contributor` (default) | `$OPENCLAW_PROJECTS_DIR/<repo>` (default: `~/Projects/`) | User intends to contribute, push commits, open PRs |
+| `external` | `$OPENCLAW_EXTERNAL_DIR/<repo>` (default: `~/external-github-repos/`) | Non-temporary reference repo, reading/learning, not contributing |
+| `temporary` | `$OPENCLAW_TEMP_DIR/<repo>` (default: `/tmp/github/`) | Quick investigation, throwaway, will be deleted soon |
 
 ### Deciding the Purpose
 
@@ -137,8 +137,11 @@ When a user asks to clone a repo owned by someone not in the configured accounts
 
 ## Configuration
 
-The account config file location can be overridden with the `OPENCLAW_GITHUB_ACCOUNTS_FILE` environment variable:
+### Environment Variables
 
-```bash
-export OPENCLAW_GITHUB_ACCOUNTS_FILE=/path/to/custom/github-accounts.json
-```
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OPENCLAW_GITHUB_ACCOUNTS_FILE` | `~/.openclaw/github-accounts.json` | Path to the account config file |
+| `OPENCLAW_PROJECTS_DIR` | `~/Projects` | Destination for `contributor` clones |
+| `OPENCLAW_EXTERNAL_DIR` | `~/external-github-repos` | Destination for `external` clones |
+| `OPENCLAW_TEMP_DIR` | `/tmp/github` | Destination for `temporary` clones |

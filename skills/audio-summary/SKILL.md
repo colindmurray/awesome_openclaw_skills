@@ -1,6 +1,6 @@
 ---
 name: audio-summary
-description: Generate conversational audio summaries using text-to-speech. Supports multiple providers (Gemini TTS, OpenAI TTS, ElevenLabs) with preference order and automatic fallback. Uploads audio to Discord for playback.
+description: Generate conversational audio summaries using text-to-speech. Supports multiple providers (Gemini TTS, OpenAI TTS, ElevenLabs) with preference order and automatic fallback.
 metadata:
   openclaw:
     emoji: 🔊
@@ -11,7 +11,7 @@ metadata:
 
 # Audio Summary Skill
 
-Generates conversational audio summaries and uploads them to Discord.
+Generates conversational audio summaries using multi-provider TTS.
 
 ## When to Use
 
@@ -24,7 +24,7 @@ Generates conversational audio summaries and uploads them to Discord.
 
 1. **Generate summary text** — Create a conversational summary (150 words max, 30-60 seconds)
 2. **Convert to audio** — Use TTS provider (Gemini → OpenAI → ElevenLabs fallback)
-3. **Upload to Discord** — Use message tool with `media` parameter
+3. **Deliver audio** — Upload via your chat platform or serve locally
 
 ## Provider Preference Order
 
@@ -40,7 +40,7 @@ Generates conversational audio summaries and uploads them to Discord.
 ## Usage
 
 ```bash
-# Generate audio from text (auto-deletes after Discord upload)
+# Generate audio from text (auto-deletes after delivery)
 ~/.openclaw/skills/audio-summary/bin/generate_audio "Your summary text here" --cleanup
 
 # With custom output path
@@ -50,25 +50,24 @@ Generates conversational audio summaries and uploads them to Discord.
 ~/.openclaw/skills/audio-summary/bin/generate_audio "Text" --provider openai --cleanup
 ```
 
-## Cleanup After Upload
+## Cleanup After Delivery
 
-**IMPORTANT:** Audio files are transient. Delete them immediately after uploading to Discord.
+**IMPORTANT:** Audio files are transient. Delete them after delivery.
 
 **Pattern:**
 ```bash
-# Generate, upload, delete
+# Generate, deliver, delete
 AUDIO_FILE=$(~/.openclaw/skills/audio-summary/bin/generate_audio "text" --provider openai)
-message --action send --channel discord --target <channel> --media "$AUDIO_FILE" --caption "🔊 Audio"
+# ... upload or serve the file ...
 rm -f "$AUDIO_FILE"
 ```
 
-**Why:** Audio files can build up quickly. A 30-second clip is ~400KB. Clean up after every upload.
+**Why:** Audio files can build up quickly. A 30-second clip is ~400KB. Clean up after every use.
 
-**Incoming audio cleanup:** Discord voice messages in `~/.openclaw/media/inbound/` should also be cleaned periodically:
+**Incoming audio cleanup:** Voice messages in `~/.openclaw/media/inbound/` should also be cleaned periodically:
 ```bash
 # Clean up audio older than 1 day
 find ~/.openclaw/media/inbound -name "*.ogg" -mtime +1 -delete
-```
 ```
 
 ## Script Output
@@ -79,18 +78,14 @@ Returns the path to the generated MP3 file:
 /tmp/audio-summary-1738123456.mp3
 ```
 
-## Discord Upload
+## Delivery
 
-After generating audio, upload to Discord:
+After generating audio, deliver it to your platform. Example using OpenClaw's message tool:
 
-```javascript
-message({
-  action: "send",
-  channel: "discord",
-  target: "<channel_id>",
-  media: "/tmp/audio-summary-1738123456.mp3",
-  caption: "🔊 Audio summary"
-})
+```bash
+# Upload to chat platform
+message --action send --channel <YOUR_CHANNEL> --target <TARGET_ID> \
+  --media /tmp/audio-summary-1738123456.mp3 --caption "Audio summary"
 ```
 
 ## Summary Style Guidelines
@@ -101,7 +96,7 @@ message({
 - **Actionable** — Highlight what was done and what's next
 
 **Example:**
-> "Hey! Just wrapped up the audio transcription skill. It uses Gemini to convert Discord voice messages to text in real time. Tested it on a few sample recordings — works like a charm. The multi-provider fallback is also wired up, so if Gemini is down, it'll automatically try OpenAI and then ElevenLabs. Everything's ready to go!"
+> "Hey! Just wrapped up the audio transcription skill. It uses Gemini to convert voice messages to text. Tested it on a few sample recordings — works great. The multi-provider fallback is also wired up, so if Gemini is down, it'll automatically try OpenAI and then ElevenLabs. Everything's ready to go!"
 
 ## Configuration
 
@@ -111,7 +106,7 @@ Set provider preference in `TOOLS.md`:
 ### Audio Summary
 - Preferred provider: gemini
 - Fallback: openai
-- Voice: nova (openai), Zuben (gemini)
+- Voice: nova (openai), Aoede (gemini)
 ```
 
 ## Environment Variables
@@ -134,7 +129,7 @@ Set provider preference in `TOOLS.md`:
 - Check that at least one API key is set
 - Verify keys are set in your environment or `~/.openclaw/secrets/` directory
 
-### "Audio file too large for Discord"
+### "Audio file too large"
 - Keep summaries under 150 words
 - Use `--provider openai` for MP3 (smaller than WAV)
 

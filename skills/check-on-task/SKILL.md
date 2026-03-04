@@ -53,7 +53,7 @@ Each background task launched with `--mode heartbeat` gets a **monitor watchdog*
 - Checks PID liveness every 120 seconds
 - If the task dies unexpectedly, the monitor:
   - Moves the manifest to `failed/` with `monitorDetected: true`
-  - Sends a Discord notification immediately
+  - Sends a notification immediately
   - Fires a system event to wake the AI for retry decisions
 
 ### Interpreting Monitor Fields
@@ -66,7 +66,7 @@ Each background task launched with `--mode heartbeat` gets a **monitor watchdog*
 | `monitorDetected: true` | Task death was caught by monitor (fast-path, <2 min) |
 | No `monitorDetected` | Task death was caught by cleanup_tasks (slow-path, up to 30 min) |
 
-If `monitorDetected: true`, the user has already been notified via Discord — focus on interpretation and retry decisions, not re-notification.
+If `monitorDetected: true`, the user has already been notified — focus on interpretation and retry decisions, not re-notification.
 
 ## For Coding Agents
 
@@ -83,9 +83,4 @@ For advanced agent analysis techniques, see `AGENT_ANALYSIS.md`.
 
 ## Caution on Killing
 
-Only kill a process if you are **certain** it is stuck:
-- Output has been completely silent for a long time (not just slow)
-- Error loops detected (same error repeating)
-- Hang detected (result event + PID alive)
-
-Processes that are slow but making progress should be **left alone**. Coding agents often have long thinking pauses between tool calls — this is normal.
+Only kill a process if it is clearly stuck (completely silent output for extended period, error loops, or hang detected with result event + PID alive). Coding agents often have long pauses between tool calls — this is normal.

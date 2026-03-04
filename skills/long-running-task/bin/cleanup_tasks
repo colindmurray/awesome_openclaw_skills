@@ -30,7 +30,7 @@ STREAMS_DIR="$TASKS_DIR/streams"
 # --- Defaults ---
 MAX_AGE=7             # days
 STALL_THRESHOLD=1800  # seconds (30 min)
-CHANNEL="discord"
+CHANNEL="${OPENCLAW_DEFAULT_CHANNEL:-}"
 
 # --- Parse arguments ---
 while [[ $# -gt 0 ]]; do

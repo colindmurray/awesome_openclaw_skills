@@ -133,8 +133,8 @@ EXEC_COMMAND="$COMMAND"
 if [[ "$TYPE" == "coding-agent" ]]; then
   case "$AGENT" in
     claude)
-      # Unset ANTHROPIC_API_KEY to force OAuth subscription billing (configurable)
-      if [[ "${OPENCLAW_UNSET_ANTHROPIC_KEY:-true}" == "true" ]]; then
+      # Optionally unset ANTHROPIC_API_KEY to force OAuth subscription billing
+      if [[ "${OPENCLAW_UNSET_ANTHROPIC_KEY:-false}" == "true" ]]; then
         EXEC_COMMAND="env -u ANTHROPIC_API_KEY claude -p --dangerously-skip-permissions --output-format stream-json --verbose"
       else
         EXEC_COMMAND="claude -p --dangerously-skip-permissions --output-format stream-json --verbose"

@@ -23,7 +23,7 @@ Substitute `<PROMPT>`, `<WORKDIR>`, `<SESSION_ID>`, `<TARGET_ID>`:
   --workdir "<WORKDIR>" \
   --summary "<PROMPT>" \
   --session-id "<SESSION_ID>" \
-  --channel discord \
+  --channel <YOUR_CHANNEL> \
   --target "<TARGET_ID>"
 ```
 
@@ -35,7 +35,7 @@ Substitute `<PROMPT>`, `<WORKDIR>`, `<SESSION_ID>`, `<TARGET_ID>`:
   --command "<COMMAND>" \
   --summary "<DESCRIPTION>" \
   --session-id "<SESSION_ID>" \
-  --channel discord \
+  --channel <YOUR_CHANNEL> \
   --target "<TARGET_ID>"
 ```
 
@@ -48,11 +48,11 @@ Substitute `<PROMPT>`, `<WORKDIR>`, `<SESSION_ID>`, `<TARGET_ID>`:
   --timeout 7200 \
   --summary "<DESCRIPTION>" \
   --session-id "<SESSION_ID>" \
-  --channel discord \
+  --channel <YOUR_CHANNEL> \
   --target "<TARGET_ID>"
 ```
 
-**IMPORTANT:** ALWAYS include `--target` with the Discord target ID from your `SESSION_CONTEXT.md`. This ensures notifications reach the user immediately.
+**IMPORTANT:** ALWAYS include `--target` with the target ID from your `SESSION_CONTEXT.md`. This ensures notifications reach the user immediately.
 
 ---
 
@@ -71,7 +71,7 @@ The script handles **deterministic** notifications automatically — the AI does
 | Memory pressure | `monitor_task` cron | Within ~5 minutes |
 
 **AI must handle:**
-- **Retry decisions** — NEVER retry silently. ALWAYS notify the user in Discord before retrying a failed task.
+- **Retry decisions** — NEVER retry silently. ALWAYS notify the user before retrying a failed task.
 - **Milestone updates** — Significant progress points during long tasks
 - **Result interpretation** — What the task output means, what to do next
 
@@ -96,8 +96,8 @@ When a task fails and you decide to retry:
 
 | Flag | Description |
 |------|-------------|
-| `--target` | Discord channel/group target ID from `SESSION_CONTEXT.md` — enables auto-notifications |
-| `--channel` | Notification channel (e.g., `discord`) |
+| `--target` | Chat channel/group target ID from `SESSION_CONTEXT.md` — enables auto-notifications |
+| `--channel` | Notification channel (e.g., `discord`, `slack`) |
 | `--session-id` | UUID linking this task to a session |
 
 ### Execution Mode
@@ -173,7 +173,7 @@ Every background task gets a manifest at `~/.openclaw/tasks/active/{taskId}.json
 |-------|-------------|
 | `pid` | The main task process ID |
 | `monitorPid` | The PID watchdog process ID (detects OOM/SIGKILL within ~2 min) |
-| `notifyTarget` | Discord channel/group ID for notifications |
+| `notifyTarget` | Channel/group ID for notifications |
 | `monitorDetected` | `true` if death was detected by monitor (fast-path) |
 
 On completion: manifest moves to `completed/` with `completedAt` + `exitCode`
@@ -199,10 +199,9 @@ Three layers detect task death:
 
 ## Memory Constraints
 
-The server has 7.6GB RAM. Concurrent coding agents risk OOM kills:
-- A single Claude Code agent uses ~1-2GB
-- Two concurrent agents may trigger OOM
-- Check memory with `check_task --all --json` before launching parallel tasks
+Coding agents use significant RAM (~1-2GB each). Before launching concurrent agents:
+- Check memory with `check_task --all --json`
+- On low-memory systems, run agents sequentially
 
 ---
 

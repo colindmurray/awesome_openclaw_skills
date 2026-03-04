@@ -150,13 +150,13 @@ DEST_DIR=""
 
 case "$PURPOSE" in
   contributor)
-    DEST_DIR="$HOME/Projects/$CLONE_NAME"
+    DEST_DIR="${OPENCLAW_PROJECTS_DIR:-$HOME/Projects}/$CLONE_NAME"
     ;;
   external)
-    DEST_DIR="$HOME/external-github-repos/$CLONE_NAME"
+    DEST_DIR="${OPENCLAW_EXTERNAL_DIR:-$HOME/external-github-repos}/$CLONE_NAME"
     ;;
   temporary|temp)
-    DEST_DIR="/tmp/github/$CLONE_NAME"
+    DEST_DIR="${OPENCLAW_TEMP_DIR:-/tmp/github}/$CLONE_NAME"
     ;;
   *)
     echo "Error: Unknown purpose '$PURPOSE'. Use: contributor, external, or temporary." >&2
