@@ -79,8 +79,6 @@ When the task type is `coding-agent`, you get deeper analysis:
 - **Hang detection**: Claude stream-json bug where process stays alive after `result` event
 - **System memory**: current memory usage (useful for OOM risk assessment)
 
-For advanced agent analysis techniques, see `AGENT_ANALYSIS.md`.
-
 ## Caution on Killing
 
 Only kill a process if it is clearly stuck (completely silent output for extended period, error loops, or hang detected with result event + PID alive). Coding agents often have long pauses between tool calls — this is normal.

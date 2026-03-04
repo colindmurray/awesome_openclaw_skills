@@ -147,12 +147,11 @@ if [[ "$TYPE" == "coding-agent" ]]; then
     claude)
       # Determine if we should unset ANTHROPIC_API_KEY for subscription billing
       # Explicit env var takes priority over config file
-      local use_subscription=false
+      use_subscription=false
       if [[ "${OPENCLAW_UNSET_ANTHROPIC_KEY:-}" == "true" ]]; then
         use_subscription=true
       elif [[ -z "${OPENCLAW_UNSET_ANTHROPIC_KEY:-}" ]]; then
         # No env var set — check config file
-        local billing_mode
         billing_mode="$(_resolve_agent_billing claude)"
         if [[ "$billing_mode" == "subscription" ]]; then
           use_subscription=true

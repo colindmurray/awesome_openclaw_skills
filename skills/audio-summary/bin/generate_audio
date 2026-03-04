@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # generate_audio - Generate audio from text using TTS providers
 #
@@ -201,16 +201,19 @@ generate_openai() {
 
   echo "[openai] Generating audio with gpt-4o-mini-tts (voice: nova)..." >&2
 
+  local request_body
+  request_body=$(jq -n --arg text "$text" '{
+    model: "gpt-4o-mini-tts",
+    input: $text,
+    voice: "nova",
+    response_format: "mp3"
+  }')
+
   local response
   response=$(curl -s -w "\n%{http_code}" "https://api.openai.com/v1/audio/speech" \
     -H "Authorization: Bearer $OPENAI_API_KEY" \
     -H "Content-Type: application/json" \
-    -d '{
-      "model": "gpt-4o-mini-tts",
-      "input": "'"$text"'",
-      "voice": "nova",
-      "response_format": "mp3"
-    }' --output "$output" 2>&1)
+    -d "$request_body" --output "$output" 2>&1)
 
   local http_code
   http_code=$(echo "$response" | tail -1)
@@ -240,18 +243,21 @@ generate_elevenlabs() {
   # Rachel voice ID: 21m00Tcm4TlvDq8ikWAM
   local voice_id="21m00Tcm4TlvDq8ikWAM"
 
+  local request_body
+  request_body=$(jq -n --arg text "$text" '{
+    text: $text,
+    model_id: "eleven_multilingual_v2",
+    voice_settings: {
+      stability: 0.5,
+      similarity_boost: 0.75
+    }
+  }')
+
   local response
   response=$(curl -s -w "\n%{http_code}" "https://api.elevenlabs.io/v1/text-to-speech/$voice_id" \
     -H "xi-api-key: $ELEVENLABS_API_KEY" \
     -H "Content-Type: application/json" \
-    -d '{
-      "text": "'"$text"'",
-      "model_id": "eleven_multilingual_v2",
-      "voice_settings": {
-        "stability": 0.5,
-        "similarity_boost": 0.75
-      }
-    }' --output "$output" 2>&1)
+    -d "$request_body" --output "$output" 2>&1)
 
   local http_code
   http_code=$(echo "$response" | tail -1)

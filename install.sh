@@ -496,6 +496,33 @@ if [[ "$UNINSTALL" == true ]]; then
     fi
   fi
 
+  # Uninstall workspace files
+  if [[ -f "$TARGET_DIR/workspace/HEARTBEAT.md" ]]; then
+    if [[ "$DRY_RUN" == true ]]; then
+      echo -e "  ${BLUE}[dry-run]${NC} Would remove: workspace/HEARTBEAT.md"
+    else
+      rm -f "$TARGET_DIR/workspace/HEARTBEAT.md"
+      echo -e "  ${RED}Removed${NC} workspace/HEARTBEAT.md"
+    fi
+  fi
+
+  # Uninstall config files created by installer
+  if [[ -f "$TARGET_DIR/coding-agents.json" ]]; then
+    if [[ "$DRY_RUN" == true ]]; then
+      echo -e "  ${BLUE}[dry-run]${NC} Would remove: coding-agents.json"
+    else
+      rm -f "$TARGET_DIR/coding-agents.json"
+      echo -e "  ${RED}Removed${NC} coding-agents.json"
+    fi
+  fi
+
+  # Note: github-accounts.json and secrets/ contain user data — leave them
+  if [[ -f "$TARGET_DIR/github-accounts.json" ]] || [[ -d "$TARGET_DIR/secrets" ]]; then
+    echo ""
+    echo -e "  ${YELLOW}Kept user config:${NC} github-accounts.json, secrets/ (contains your credentials)"
+    echo -e "  Remove manually if desired: rm $TARGET_DIR/github-accounts.json && rm -rf $TARGET_DIR/secrets/"
+  fi
+
   echo ""
   echo -e "${GREEN}Uninstall complete.${NC}"
   exit 0
@@ -665,10 +692,10 @@ if [[ "$needs_coding_agent_setup" == true ]]; then
 fi
 
 # --- Config file check ---
-if [[ ! -f "$HOME/.openclaw/github-accounts.json" ]]; then
+if [[ ! -f "$TARGET_DIR/github-accounts.json" ]]; then
   echo ""
   echo -e "${YELLOW}Note:${NC} No github-accounts.json found."
-  echo -e "  Copy the example: cp ${SCRIPT_DIR}/config/github-accounts.example.json ~/.openclaw/github-accounts.json"
+  echo -e "  Copy the example: cp ${SCRIPT_DIR}/config/github-accounts.example.json $TARGET_DIR/github-accounts.json"
   echo -e "  Then edit it with your account details."
 fi
 

@@ -72,10 +72,10 @@ find ~/.openclaw/media/inbound -name "*.ogg" -mtime +1 -delete
 
 ## Script Output
 
-Returns the path to the generated MP3 file:
+Returns the path to the generated audio file (`.wav` for Gemini, `.mp3` for OpenAI/ElevenLabs):
 
 ```
-/tmp/audio-summary-1738123456.mp3
+/tmp/audio-summary-1738123456.wav
 ```
 
 ## Delivery
@@ -98,17 +98,6 @@ message --action send --channel <YOUR_CHANNEL> --target <TARGET_ID> \
 **Example:**
 > "Hey! Just wrapped up the audio transcription skill. It uses Gemini to convert voice messages to text. Tested it on a few sample recordings — works great. The multi-provider fallback is also wired up, so if Gemini is down, it'll automatically try OpenAI and then ElevenLabs. Everything's ready to go!"
 
-## Configuration
-
-Set provider preference in `TOOLS.md`:
-
-```markdown
-### Audio Summary
-- Preferred provider: gemini
-- Fallback: openai
-- Voice: nova (openai), Aoede (gemini)
-```
-
 ## Environment Variables
 
 | Variable | Required For | Notes |
@@ -120,7 +109,6 @@ Set provider preference in `TOOLS.md`:
 ## Files
 
 - `bin/generate_audio` — Main TTS script with multi-provider support
-- `bin/providers/` — Provider-specific implementations
 - `SKILL.md` — This documentation
 
 ## Troubleshooting

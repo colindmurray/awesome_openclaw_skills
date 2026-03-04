@@ -261,7 +261,6 @@ check_output_staleness
 # Clean up stale-warned files for tasks no longer active
 for warn_file in "$TASKS_DIR"/.stale-warned-*; do
   [[ -f "$warn_file" ]] || continue
-  local warned_task_id
   warned_task_id="$(basename "$warn_file" | sed 's/^\.stale-warned-//')"
   if [[ ! -f "$ACTIVE_DIR/${warned_task_id}.json" ]]; then
     rm -f "$warn_file"

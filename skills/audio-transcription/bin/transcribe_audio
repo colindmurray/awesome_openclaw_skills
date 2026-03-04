@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # transcribe_audio - Transcribe audio files using Gemini 2.5 Flash
 #

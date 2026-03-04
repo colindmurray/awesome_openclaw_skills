@@ -90,7 +90,6 @@ for manifest in "$ACTIVE_DIR"/*.json; do
   if ! kill -0 "$pid" 2>/dev/null; then
     # Check if monitor_pid or monitor_task already handled this
     if [[ -f "$FAILED_DIR/$task_id.json" ]]; then
-      local already_detected
       already_detected="$(jq -r '.monitorDetected // empty' "$FAILED_DIR/$task_id.json" 2>/dev/null || true)"
       if [[ "$already_detected" == "true" ]]; then
         echo "[cleanup] Dead task $task_id already detected by monitor — skipping re-notification"
@@ -323,7 +322,6 @@ done < <(find /tmp -name "task-complete-*.json" -mtime +"$MAX_AGE" -print0 2>/de
 echo "[cleanup] Cleaning up stale-warned state files..."
 for warn_file in "$TASKS_DIR"/.stale-warned-*; do
   [[ -f "$warn_file" ]] || continue
-  local warned_task_id
   warned_task_id="$(basename "$warn_file" | sed 's/^\.stale-warned-//')"
   if [[ ! -f "$ACTIVE_DIR/${warned_task_id}.json" ]]; then
     rm -f "$warn_file"
@@ -551,10 +549,8 @@ _cleanup_repos_checked=()
 for _dir in "$COMPLETED_DIR" "$FAILED_DIR"; do
   for _manifest in "$_dir"/*.json; do
     [[ -f "$_manifest" && -s "$_manifest" ]] || continue
-    local _wt
     _wt="$(jq -r '.worktree // empty' "$_manifest" 2>/dev/null || true)"
     [[ -z "$_wt" || "$_wt" == "null" || ! -d "$_wt" ]] && continue
-    local _main_repo
     _main_repo="$(git -C "$_wt" rev-parse --git-common-dir 2>/dev/null || true)"
     [[ -z "$_main_repo" ]] && continue
     [[ "$_main_repo" != /* ]] && _main_repo="$(realpath "$_wt/$_main_repo" 2>/dev/null || true)"

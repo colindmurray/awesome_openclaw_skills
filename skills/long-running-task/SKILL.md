@@ -156,6 +156,7 @@ Do NOT use timeout for:
 - Quick coding agent tasks expected to finish in <5 minutes
 - Run the agent directly: `claude -p --dangerously-skip-permissions "<PROMPT>"`
 - The coding-agent skill covers both patterns (direct and background)
+- **Note:** Direct mode does not apply billing settings from `coding-agents.json`. For subscription billing in direct mode, use `env -u ANTHROPIC_API_KEY claude ...` manually.
 
 ---
 

@@ -131,11 +131,7 @@ opencode run 'Your task'
 
 ## Configuration
 
-Configure agent preferences and billing in `~/.openclaw/coding-agents.json`. The installer creates this interactively, or copy the example:
-
-```bash
-cp config/coding-agents.example.json ~/.openclaw/coding-agents.json
-```
+Configure agent preferences and billing in `~/.openclaw/coding-agents.json`. The installer creates this interactively, or create it manually from the inline example below.
 
 ### Config Format
 
@@ -163,7 +159,7 @@ cp config/coding-agents.example.json ~/.openclaw/coding-agents.json
 ### Billing Modes
 
 - **`api_key`** (default) — Uses the standard API key environment variable (e.g., `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`)
-- **`subscription`** — For agents that support OAuth/subscription billing. For Claude, this unsets `ANTHROPIC_API_KEY` so Claude Code falls back to OAuth subscription billing.
+- **`subscription`** — For agents that support OAuth/subscription billing. Currently only affects Claude: unsets `ANTHROPIC_API_KEY` so Claude Code falls back to OAuth subscription billing. Other agents ignore this setting for now.
 
 The billing mode can also be overridden per-invocation with `OPENCLAW_UNSET_ANTHROPIC_KEY=true|false`.
 
