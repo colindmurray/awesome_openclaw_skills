@@ -142,10 +142,17 @@ if [[ "$platform" != "windows" && "$platform" != "unknown" ]]; then
     fail "available ($avail) > total ($total)"
   fi
 
-  # Cross-validate: usage pct should match manual calculation
+  # Cross-validate: usage pct should roughly match manual calculation
+  # Allow ±2% tolerance since memory changes between calls
   if [[ "$total" -gt 0 ]]; then
     expected_pct=$(( (total - avail) * 100 / total ))
-    assert_eq "usage pct matches manual calc" "$expected_pct" "$pct"
+    diff=$(( pct - expected_pct ))
+    if [[ "$diff" -lt 0 ]]; then diff=$(( -diff )); fi
+    if [[ "$diff" -le 2 ]]; then
+      pass "usage pct within 2% of manual calc (got=$pct, expected=$expected_pct)"
+    else
+      fail "usage pct too far from manual calc (got=$pct, expected=$expected_pct, diff=$diff)"
+    fi
   fi
 
   # Repeated calls should return consistent results (not wildly different)

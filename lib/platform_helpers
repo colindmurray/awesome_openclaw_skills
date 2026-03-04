@@ -275,7 +275,7 @@ check_oom_in_logs() {
 # Determine likely cause of process death. Prints a human-readable string.
 # Args: (none — checks current system state)
 determine_death_cause() {
-  local mem_snapshot="" likely_cause="Process died unexpectedly"
+  local mem_snapshot=""
 
   local avail total usage
   avail="$(get_available_memory_mb)"
