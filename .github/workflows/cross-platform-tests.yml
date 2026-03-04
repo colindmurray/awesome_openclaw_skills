@@ -46,26 +46,30 @@ jobs:
 
       - name: Verify no bash 3.2 incompatibilities
         run: |
+          FOUND=0
+
           # Check for ${var,,} pattern which fails on bash 3.2 (macOS default)
-          if grep -rn '${[a-zA-Z_]*,,}' lib/ skills/ install.sh 2>/dev/null; then
-            echo "FAIL: Found bash 4+ only ${var,,} syntax"
-            exit 1
+          if grep -rn '\${[a-zA-Z_]*,,}' lib/ skills/ install.sh 2>/dev/null; then
+            echo 'FAIL: Found bash 4+ only ${var,,} syntax'
+            FOUND=1
           else
-            echo "PASS: No ${var,,} patterns found"
+            echo 'PASS: No ${var,,} patterns found'
           fi
 
           # Check for ${var^^} pattern
-          if grep -rn '${[a-zA-Z_]*\^\^}' lib/ skills/ install.sh 2>/dev/null; then
-            echo "FAIL: Found bash 4+ only ${var^^} syntax"
-            exit 1
+          if grep -rn '\${[a-zA-Z_]*\^\^}' lib/ skills/ install.sh 2>/dev/null; then
+            echo 'FAIL: Found bash 4+ only ${var^^} syntax'
+            FOUND=1
           else
-            echo "PASS: No ${var^^} patterns found"
+            echo 'PASS: No ${var^^} patterns found'
           fi
 
           # Check for associative arrays (declare -A)
           if grep -rn 'declare -A' lib/ skills/ install.sh 2>/dev/null; then
-            echo "FAIL: Found bash 4+ only associative arrays"
-            exit 1
+            echo 'FAIL: Found bash 4+ only associative arrays'
+            FOUND=1
           else
-            echo "PASS: No associative arrays found"
+            echo 'PASS: No associative arrays found'
           fi
+
+          exit $FOUND
