@@ -39,7 +39,7 @@ NDJSON streaming, watchdogs, notifications, and monitoring automatically.
   --session-id "<SESSION_ID>" \
   --channel <CHANNEL> \
   --target "<TARGET_ID>" \
-  --permission-mode acceptEdits  # or bypassPermissions for full access
+  --permission-mode bypassPermissions  # default; use acceptEdits for sandboxed/read-edit-only
 ```
 
 ### Direct mode (quick tasks <5 min)
@@ -47,14 +47,14 @@ NDJSON streaming, watchdogs, notifications, and monitoring automatically.
 Run the agent directly and wait for the response:
 
 ```bash
-# Safe defaults (sandboxed — can read/edit files, no bash)
-claude -p --permission-mode acceptEdits "<PROMPT>"
-gemini --approval-mode auto_edit -p "<PROMPT>"
-
-# Full access (only when needed — running tests, installs, system changes)
+# Full access (default — can run tests, installs, builds, git operations)
 claude -p --dangerously-skip-permissions "<PROMPT>"
 gemini -y -p "<PROMPT>"
 codex -s danger-full-access --dangerously-bypass-approvals-and-sandbox exec "<PROMPT>"
+
+# Sandboxed (only when explicitly requested — can read/edit files, no bash)
+claude -p --permission-mode acceptEdits "<PROMPT>"
+gemini --approval-mode auto_edit -p "<PROMPT>"
 ```
 
 No manifest needed — you're blocking and will see the result immediately.
@@ -101,8 +101,8 @@ Coding agents use significant RAM (~1-2GB each). The task launcher **automatical
 | Mode | Command | Use when |
 |------|---------|----------|
 | One-shot | `claude -p "prompt"` | Quick queries, no file changes |
-| Auto-edit (recommended) | `claude -p --permission-mode acceptEdits "prompt"` | Code-only tasks: reading, editing, writing files |
-| Full auto (headless) | `claude -p --dangerously-skip-permissions "prompt"` | Tasks needing bash: tests, installs, builds, system changes |
+| Full auto (recommended) | `claude -p --dangerously-skip-permissions "prompt"` | Default for headless agents: tests, installs, builds, git, system changes |
+| Auto-edit (sandboxed) | `claude -p --permission-mode acceptEdits "prompt"` | Restricted: file read/edit only, no bash. Use only when explicitly requested |
 
 ### Codex CLI
 
@@ -293,7 +293,7 @@ tmux -S "$SOCKET" capture-pane -p -t agent-1 -S -100
 
 ## Sandboxing & Permission Modes
 
-By default, agents launched via `execute_long_running_task` run in **sandboxed mode** (`--permission-mode acceptEdits`). This is the safest option for most tasks.
+By default, agents launched via `execute_long_running_task` run with **full permissions** (`--permission-mode bypassPermissions`). This ensures agents can complete end-to-end workflows including tests, git operations, and builds without getting blocked by sandbox restrictions.
 
 ### Permission modes
 
@@ -301,23 +301,23 @@ By default, agents launched via `execute_long_running_task` run in **sandboxed m
 
 | `--permission-mode` | Claude Code | Codex CLI | Gemini CLI |
 |---------------------|-------------|-----------|------------|
-| `acceptEdits` (default) | `--permission-mode acceptEdits` | `--full-auto` | `--approval-mode auto_edit` |
-| `bypassPermissions` | `--dangerously-skip-permissions` | `-s danger-full-access --yolo` | `-y` (yolo) |
+| `bypassPermissions` (default) | `--dangerously-skip-permissions` | `-s danger-full-access --yolo` | `-y` (yolo) |
+| `acceptEdits` | `--permission-mode acceptEdits` | `--full-auto` | `--approval-mode auto_edit` |
 
 ### When to use each mode
 
-**Use `acceptEdits` (default) for:**
-- Investigating/exploring codebases
-- Writing or editing code, documentation, configs
-- Refactoring, adding features, fixing bugs (code-only)
-- Any task that only needs file read/write
-
-**Use `bypassPermissions` for:**
+**Use `bypassPermissions` (default) for:**
+- Most tasks — this is the default and recommended mode
 - Running tests (`npm test`, `pytest`, `cargo test`)
 - Installing dependencies (`npm install`, `pip install`)
 - Building projects (`make`, `cargo build`)
-- Git operations (commit, push, branch management)
-- System-level changes (service restarts, config file edits outside workdir)
+- Git operations (commit, push, branch management, PR creation)
+- Any end-to-end workflow (implement → test → commit → push → PR)
+
+**Use `acceptEdits` only when explicitly requested for:**
+- Restricted sandboxed execution (file read/edit only, no bash)
+- Security-sensitive environments where bash access must be blocked
+- When the user specifically asks for sandboxed/restricted mode
 
 ### Worktrees for isolation
 
@@ -334,12 +334,12 @@ execute_long_running_task --type coding-agent --agent claude \
 ### Overriding per-task
 
 ```bash
-# Default: sandboxed (acceptEdits)
+# Default: full access (bypassPermissions)
 execute_long_running_task --type coding-agent --agent claude --command "..."
 
-# Explicit full access when needed
+# Explicit sandboxed mode when requested
 execute_long_running_task --type coding-agent --agent claude --command "..." \
-  --permission-mode bypassPermissions
+  --permission-mode acceptEdits
 ```
 
 ---
@@ -348,7 +348,7 @@ execute_long_running_task --type coding-agent --agent claude --command "..." \
 
 1. **Always use pty:true** — coding agents need a terminal
 2. **Use `--workdir`** — keeps agent focused on the target project, prevents reading unrelated files
-3. **Default to `acceptEdits`** — only use `bypassPermissions` when the task needs bash (tests, installs, builds)
+3. **Default to `bypassPermissions`** — only use `acceptEdits` when the user explicitly requests sandboxed/restricted execution
 4. **Use worktrees for parallel agents** — prevents file conflicts between concurrent agents
 5. **Never review PRs in your main working directory** — use temp dirs or worktrees
 6. **Use `check_task` to monitor background agents** — the manifest system provides richer analysis than raw logs

@@ -483,12 +483,12 @@ else
   fail "execute_long_running_task has syntax errors: $result"
 fi
 
-# Test 2: Default PERMISSION_MODE is acceptEdits
-result="$(grep 'PERMISSION_MODE="acceptEdits"' "$ELT_SCRIPT")"
+# Test 2: Default PERMISSION_MODE is bypassPermissions
+result="$(grep 'PERMISSION_MODE="bypassPermissions"' "$ELT_SCRIPT")"
 if [[ -n "$result" ]]; then
-  pass "default PERMISSION_MODE is acceptEdits"
+  pass "default PERMISSION_MODE is bypassPermissions"
 else
-  fail "default PERMISSION_MODE not set to acceptEdits"
+  fail "default PERMISSION_MODE not set to bypassPermissions"
 fi
 
 # Test 3: --permission-mode is in the arg parser
@@ -508,7 +508,7 @@ else
 fi
 
 # Test 5: acceptEdits maps to --permission-mode acceptEdits for Claude
-result="$(grep -A2 'acceptEdits|\*)' "$ELT_SCRIPT" | head -3)"
+result="$(grep -A2 'acceptEdits)' "$ELT_SCRIPT" | head -3)"
 if echo "$result" | grep -q 'permission-mode acceptEdits'; then
   pass "acceptEdits maps to --permission-mode acceptEdits for Claude"
 else

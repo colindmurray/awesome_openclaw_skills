@@ -118,9 +118,9 @@ When a task fails and you decide to retry:
 
 | Flag | Description |
 |------|-------------|
-| `--agent claude` | Use Claude Code CLI. Auto-adds: `--dangerously-skip-permissions --output-format stream-json` |
-| `--agent gemini` | Use Gemini CLI. Auto-adds: `-y` (yolo mode) |
-| `--agent codex` | Use Codex CLI. Auto-adds: `--json -s danger-full-access --dangerously-bypass-approvals-and-sandbox` |
+| `--agent claude` | Use Claude Code CLI. Default: `--dangerously-skip-permissions --output-format stream-json` (full access) |
+| `--agent gemini` | Use Gemini CLI. Default: `-y` (yolo/full access) |
+| `--agent codex` | Use Codex CLI. Default: `--json -s danger-full-access --dangerously-bypass-approvals-and-sandbox` (full access) |
 
 **Never assemble raw headless flags yourself.** The script handles them.
 

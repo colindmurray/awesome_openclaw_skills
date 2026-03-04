@@ -141,7 +141,7 @@ TIMEOUT=""             # seconds, empty = no timeout
 WORKDIR="$(pwd)"
 WORKTREE=""
 PROMPT_FILE=""
-PERMISSION_MODE="acceptEdits"  # acceptEdits | bypassPermissions
+PERMISSION_MODE="bypassPermissions"  # bypassPermissions | acceptEdits
 
 # --- Parse arguments ---
 while [[ $# -gt 0 ]]; do
@@ -238,8 +238,11 @@ if [[ "$TYPE" == "coding-agent" ]]; then
         bypassPermissions)
           claude_perm_flags="--dangerously-skip-permissions"
           ;;
-        acceptEdits|*)
+        acceptEdits)
           claude_perm_flags="--permission-mode acceptEdits"
+          ;;
+        *)
+          claude_perm_flags="--dangerously-skip-permissions"
           ;;
       esac
 
@@ -257,11 +260,11 @@ if [[ "$TYPE" == "coding-agent" ]]; then
     gemini)
       # Build approval flags based on --permission-mode
       case "$PERMISSION_MODE" in
-        bypassPermissions)
-          EXEC_COMMAND="gemini -y -p"
-          ;;
-        acceptEdits|*)
+        acceptEdits)
           EXEC_COMMAND="gemini --approval-mode auto_edit -p"
+          ;;
+        bypassPermissions|*)
+          EXEC_COMMAND="gemini -y -p"
           ;;
       esac
       if [[ -n "$PROMPT_FILE" ]]; then
@@ -273,11 +276,11 @@ if [[ "$TYPE" == "coding-agent" ]]; then
     codex)
       # Build sandbox flags based on --permission-mode
       case "$PERMISSION_MODE" in
-        bypassPermissions)
-          EXEC_COMMAND="codex -s danger-full-access --dangerously-bypass-approvals-and-sandbox --json exec"
-          ;;
-        acceptEdits|*)
+        acceptEdits)
           EXEC_COMMAND="codex --full-auto --json exec"
+          ;;
+        bypassPermissions|*)
+          EXEC_COMMAND="codex -s danger-full-access --dangerously-bypass-approvals-and-sandbox --json exec"
           ;;
       esac
       if [[ -n "$PROMPT_FILE" ]]; then
