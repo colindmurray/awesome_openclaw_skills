@@ -38,7 +38,8 @@ NDJSON streaming, watchdogs, notifications, and monitoring automatically.
   --summary "<DESCRIPTION>" \
   --session-id "<SESSION_ID>" \
   --channel <CHANNEL> \
-  --target "<TARGET_ID>"
+  --target "<TARGET_ID>" \
+  --permission-mode acceptEdits  # or bypassPermissions for full access
 ```
 
 ### Direct mode (quick tasks <5 min)
@@ -46,6 +47,11 @@ NDJSON streaming, watchdogs, notifications, and monitoring automatically.
 Run the agent directly and wait for the response:
 
 ```bash
+# Safe defaults (sandboxed — can read/edit files, no bash)
+claude -p --permission-mode acceptEdits "<PROMPT>"
+gemini --approval-mode auto_edit -p "<PROMPT>"
+
+# Full access (only when needed — running tests, installs, system changes)
 claude -p --dangerously-skip-permissions "<PROMPT>"
 gemini -y -p "<PROMPT>"
 codex -s danger-full-access --dangerously-bypass-approvals-and-sandbox exec "<PROMPT>"
@@ -92,43 +98,48 @@ Coding agents use significant RAM (~1-2GB each). The task launcher **automatical
 
 ### Claude Code
 
-| Mode | Command |
-|------|---------|
-| One-shot | `claude -p "prompt"` |
-| Auto-edit | `claude -p --permission-mode acceptEdits "prompt"` |
-| Full auto (headless) | `claude -p --dangerously-skip-permissions "prompt"` |
+| Mode | Command | Use when |
+|------|---------|----------|
+| One-shot | `claude -p "prompt"` | Quick queries, no file changes |
+| Auto-edit (recommended) | `claude -p --permission-mode acceptEdits "prompt"` | Code-only tasks: reading, editing, writing files |
+| Full auto (headless) | `claude -p --dangerously-skip-permissions "prompt"` | Tasks needing bash: tests, installs, builds, system changes |
 
 ### Codex CLI
 
-| Flag | Effect |
-|------|--------|
-| `exec "prompt"` | One-shot execution, exits when done |
-| `--full-auto` | Sandboxed but auto-approves in workspace |
-| `-s danger-full-access --dangerously-bypass-approvals-and-sandbox` | NO sandbox, NO approvals |
+| Mode | Command | Use when |
+|------|---------|----------|
+| Full auto (recommended) | `codex --full-auto exec "prompt"` | Safe default: sandboxed to workspace, auto-approves |
+| Read-only | `codex -s read-only exec "prompt"` | Investigation only, no writes |
+| Full access | `codex -s danger-full-access --dangerously-bypass-approvals-and-sandbox exec "prompt"` | System-wide changes, installs |
 
 **Note:** Codex requires a git repository. Use `mktemp -d && git init` for scratch work.
 
 ### Gemini CLI
 
-| Gemini | Description |
-|--------|-------------|
-| `gemini -p "prompt"` | Non-interactive one-shot |
-| `gemini --approval-mode auto_edit -p "prompt"` | Auto-approve edits, headless |
-| `gemini -y -p "prompt"` | Full auto (yolo mode, headless) |
+| Mode | Command | Use when |
+|------|---------|----------|
+| One-shot | `gemini -p "prompt"` | Quick queries, prompts for approval |
+| Auto-edit (recommended) | `gemini --approval-mode auto_edit -p "prompt"` | Code-only tasks: auto-approves edits, blocks shell |
+| Full auto | `gemini -y -p "prompt"` | Tasks needing shell commands |
 
 ### Pi Coding Agent
 
-```bash
-pi 'Your task'                                    # Interactive
-pi -p 'Summarize src/'                            # Non-interactive
-pi --provider openai --model gpt-4o-mini -p '...' # Custom provider
-```
+| Mode | Command | Use when |
+|------|---------|----------|
+| Restricted tools | `pi --tools read,edit -p "prompt"` | Safe: file access only, no bash |
+| Full access (default) | `pi -p "prompt"` | Pi runs unrestricted by default |
+| Custom provider | `pi --provider openai --model gpt-4o-mini -p "prompt"` | Use alternative models |
+
+**Note:** Pi has no built-in permission system. For sandboxing, restrict tools with `--tools` or run in a container.
 
 ### OpenCode
 
-```bash
-opencode run 'Your task'
-```
+| Mode | Command | Use when |
+|------|---------|----------|
+| Non-interactive | `opencode run "prompt"` | Auto-approves all permissions in non-interactive mode |
+| YOLO mode | `opencode --dangerously-skip-permissions` | Skip all permission prompts in TUI mode |
+
+**Note:** OpenCode uses config-based permissions (`bash: "deny"` / `"allow"` / `"ask"`) for fine-grained control.
 
 ---
 
@@ -280,13 +291,68 @@ tmux -S "$SOCKET" capture-pane -p -t agent-1 -S -100
 
 ---
 
+## Sandboxing & Permission Modes
+
+By default, agents launched via `execute_long_running_task` run in **sandboxed mode** (`--permission-mode acceptEdits`). This is the safest option for most tasks.
+
+### Permission modes
+
+`execute_long_running_task` normalizes permission handling across agents via `--permission-mode`:
+
+| `--permission-mode` | Claude Code | Codex CLI | Gemini CLI |
+|---------------------|-------------|-----------|------------|
+| `acceptEdits` (default) | `--permission-mode acceptEdits` | `--full-auto` | `--approval-mode auto_edit` |
+| `bypassPermissions` | `--dangerously-skip-permissions` | `-s danger-full-access --yolo` | `-y` (yolo) |
+
+### When to use each mode
+
+**Use `acceptEdits` (default) for:**
+- Investigating/exploring codebases
+- Writing or editing code, documentation, configs
+- Refactoring, adding features, fixing bugs (code-only)
+- Any task that only needs file read/write
+
+**Use `bypassPermissions` for:**
+- Running tests (`npm test`, `pytest`, `cargo test`)
+- Installing dependencies (`npm install`, `pip install`)
+- Building projects (`make`, `cargo build`)
+- Git operations (commit, push, branch management)
+- System-level changes (service restarts, config file edits outside workdir)
+
+### Worktrees for isolation
+
+Use git worktrees to isolate agents from each other and from your main working directory:
+
+```bash
+# Each agent gets its own worktree — no conflicts
+git worktree add -b fix/issue-1 /tmp/issue-1 main
+execute_long_running_task --type coding-agent --agent claude \
+  --command "Fix issue #1" --workdir /tmp/issue-1 \
+  --permission-mode bypassPermissions  # needs bash for tests
+```
+
+### Overriding per-task
+
+```bash
+# Default: sandboxed (acceptEdits)
+execute_long_running_task --type coding-agent --agent claude --command "..."
+
+# Explicit full access when needed
+execute_long_running_task --type coding-agent --agent claude --command "..." \
+  --permission-mode bypassPermissions
+```
+
+---
+
 ## Best Practices
 
 1. **Always use pty:true** — coding agents need a terminal
 2. **Use `--workdir`** — keeps agent focused on the target project, prevents reading unrelated files
-3. **Never review PRs in your main working directory** — use temp dirs or worktrees
-4. **Use `check_task` to monitor background agents** — the manifest system provides richer analysis than raw logs
-5. **Let `execute_long_running_task` handle headless flags** — don't assemble `--dangerously-skip-permissions`, `--output-format stream-json`, etc. manually
+3. **Default to `acceptEdits`** — only use `bypassPermissions` when the task needs bash (tests, installs, builds)
+4. **Use worktrees for parallel agents** — prevents file conflicts between concurrent agents
+5. **Never review PRs in your main working directory** — use temp dirs or worktrees
+6. **Use `check_task` to monitor background agents** — the manifest system provides richer analysis than raw logs
+7. **Let `execute_long_running_task` handle flags** — don't assemble `--dangerously-skip-permissions`, `--output-format stream-json`, etc. manually
 
 ---
 
