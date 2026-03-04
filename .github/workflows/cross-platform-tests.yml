@@ -73,3 +73,33 @@ jobs:
           fi
 
           exit $FOUND
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: ShellCheck lib/platform_helpers
+        run: shellcheck -s bash -S warning lib/platform_helpers
+
+      - name: ShellCheck skill bin scripts
+        run: |
+          EXIT=0
+          for f in skills/*/bin/*; do
+            [ -f "$f" ] || continue
+            echo "Checking $f..."
+            # SC1091: sourced file not found (expected since lib path varies)
+            # SC2034: unused variable (some vars are used by callers)
+            # SC1090: can't follow dynamic source (expected for platform_helpers)
+            if ! shellcheck -s bash -S warning -e SC1091,SC2034,SC1090 "$f"; then
+              EXIT=1
+            fi
+          done
+          exit $EXIT
+
+      - name: ShellCheck test scripts
+        run: shellcheck -s bash -S warning -e SC1091,SC1090 tests/test_platform_helpers.sh
