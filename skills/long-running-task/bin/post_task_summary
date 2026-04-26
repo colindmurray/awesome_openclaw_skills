@@ -4,11 +4,20 @@ set -euo pipefail
 # post_task_summary — route a per-task summary message to the channel that
 # originally launched the task.
 #
-# The HEARTBEAT.md flow uses this script so the AI never has to parse manifest
-# JSON or remember which channel each task belongs to. Reads notifyTarget and
-# channel directly from the task manifest in active/, completed/, or failed/.
+# Two modes:
+#   1) --consume <stub-path>: read routing from a pending-summaries stub
+#      written by cleanup_tasks. On successful delivery, atomically:
+#        - sets manifest.notifiedAt
+#        - removes the stub
+#      Delivery failure leaves the stub for the next heartbeat to retry.
+#      This is the preferred path for the HEARTBEAT.md flow.
+#
+#   2) --task-id ID: read routing from the manifest directly. Used for ad-hoc
+#      summaries or back-compat. Also sets notifiedAt and clears any matching
+#      stub on success.
 #
 # Usage:
+#   post_task_summary --consume PATH --message "TEXT"
 #   post_task_summary --task-id ID --message "TEXT"
 #   post_task_summary --task-id ID --message-file PATH
 #   echo "TEXT" | post_task_summary --task-id ID
@@ -17,8 +26,8 @@ set -euo pipefail
 # Exit codes:
 #   0  message routed (or dry-run printed)
 #   1  bad arguments
-#   2  task manifest not found
-#   3  no notifyTarget AND no fallback channel available
+#   2  task manifest / stub not found
+#   3  no notifyTarget AND no fallback channel available (system event fired)
 #
 # Defensive design: failure to deliver NEVER fails the heartbeat. Use --quiet to
 # suppress non-error output. The script exits non-zero only on hard misuse.
@@ -38,8 +47,10 @@ TASKS_DIR="$HOME/.openclaw/tasks"
 ACTIVE_DIR="$TASKS_DIR/active"
 COMPLETED_DIR="$TASKS_DIR/completed"
 FAILED_DIR="$TASKS_DIR/failed"
+PENDING_SUMMARIES_DIR="$TASKS_DIR/pending-summaries"
 
 TASK_ID=""
+STUB_PATH=""
 MESSAGE=""
 MESSAGE_FILE=""
 DRY_RUN=false
@@ -54,6 +65,7 @@ usage() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --task-id)          TASK_ID="$2"; shift 2 ;;
+    --consume)          STUB_PATH="$2"; shift 2 ;;
     --message|-m)       MESSAGE="$2"; shift 2 ;;
     --message-file|-f)  MESSAGE_FILE="$2"; shift 2 ;;
     --fallback-target)  FALLBACK_TARGET="$2"; shift 2 ;;
@@ -69,6 +81,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -n "$TASK_ID" && -n "$STUB_PATH" ]]; then
+  echo "[post_task_summary] error: --task-id and --consume are mutually exclusive" >&2
+  exit 1
+fi
+if [[ -z "$TASK_ID" && -z "$STUB_PATH" ]]; then
+  echo "[post_task_summary] error: one of --task-id or --consume is required" >&2
+  usage
+  exit 1
+fi
+
 log() {
   [[ "$QUIET" == true ]] && return 0
   echo "[post_task_summary] $*"
@@ -78,10 +100,32 @@ err() {
   echo "[post_task_summary] error: $*" >&2
 }
 
-if [[ -z "$TASK_ID" ]]; then
-  err "--task-id is required"
-  usage
-  exit 1
+# --- Consume mode: read routing from stub instead of manifest ---
+# Stubs are written by cleanup_tasks into pending-summaries/ and contain
+# everything needed for delivery. The stub itself is the lock — its presence
+# means "needs delivery", its absence means "delivered or never queued".
+NOTIFY_TARGET_FROM_STUB=""
+CHANNEL_FROM_STUB=""
+SUMMARY_FROM_STUB=""
+MANIFEST_FROM_STUB=""
+if [[ -n "$STUB_PATH" ]]; then
+  if [[ ! -f "$STUB_PATH" ]]; then
+    err "stub not found: $STUB_PATH"
+    exit 2
+  fi
+  if ! command -v jq &>/dev/null; then
+    err "jq is required but not installed"
+    exit 1
+  fi
+  TASK_ID="$(jq -r '.taskId // empty' "$STUB_PATH" 2>/dev/null)"
+  if [[ -z "$TASK_ID" ]]; then
+    err "stub has no taskId field: $STUB_PATH"
+    exit 2
+  fi
+  NOTIFY_TARGET_FROM_STUB="$(jq -r '.notifyTarget // empty' "$STUB_PATH" 2>/dev/null)"
+  CHANNEL_FROM_STUB="$(jq -r '.channel // empty' "$STUB_PATH" 2>/dev/null)"
+  SUMMARY_FROM_STUB="$(jq -r '.summary // empty' "$STUB_PATH" 2>/dev/null)"
+  MANIFEST_FROM_STUB="$(jq -r '.manifestPath // empty' "$STUB_PATH" 2>/dev/null)"
 fi
 
 # --- Resolve message body ---
@@ -108,15 +152,23 @@ if [[ -z "$MESSAGE" ]]; then
 fi
 
 # --- Locate manifest ---
+# In stub mode we trust the manifestPath in the stub; in task-id mode we search.
 MANIFEST=""
-for _dir in "$ACTIVE_DIR" "$COMPLETED_DIR" "$FAILED_DIR"; do
-  if [[ -f "$_dir/$TASK_ID.json" ]]; then
-    MANIFEST="$_dir/$TASK_ID.json"
-    break
-  fi
-done
-
+if [[ -n "$MANIFEST_FROM_STUB" && -f "$MANIFEST_FROM_STUB" ]]; then
+  MANIFEST="$MANIFEST_FROM_STUB"
+fi
 if [[ -z "$MANIFEST" ]]; then
+  for _dir in "$ACTIVE_DIR" "$COMPLETED_DIR" "$FAILED_DIR"; do
+    if [[ -f "$_dir/$TASK_ID.json" ]]; then
+      MANIFEST="$_dir/$TASK_ID.json"
+      break
+    fi
+  done
+fi
+
+# In stub mode the manifest may have already been pruned (rare but possible).
+# That's not fatal — the stub has all routing info. We just can't set notifiedAt.
+if [[ -z "$MANIFEST" && -z "$STUB_PATH" ]]; then
   err "no manifest found for task: $TASK_ID (searched active/, completed/, failed/)"
   exit 2
 fi
@@ -126,10 +178,17 @@ if ! command -v jq &>/dev/null; then
   exit 1
 fi
 
-# --- Read routing fields from manifest ---
-NOTIFY_TARGET="$(jq -r '.notifyTarget // empty' "$MANIFEST" 2>/dev/null || true)"
-CHANNEL="$(jq -r '.channel // empty' "$MANIFEST" 2>/dev/null || true)"
-SUMMARY="$(jq -r '.summary // empty' "$MANIFEST" 2>/dev/null || true)"
+# --- Read routing fields ---
+# Stub fields take priority over manifest fields when in --consume mode.
+if [[ -n "$STUB_PATH" ]]; then
+  NOTIFY_TARGET="$NOTIFY_TARGET_FROM_STUB"
+  CHANNEL="$CHANNEL_FROM_STUB"
+  SUMMARY="$SUMMARY_FROM_STUB"
+else
+  NOTIFY_TARGET="$(jq -r '.notifyTarget // empty' "$MANIFEST" 2>/dev/null || true)"
+  CHANNEL="$(jq -r '.channel // empty' "$MANIFEST" 2>/dev/null || true)"
+  SUMMARY="$(jq -r '.summary // empty' "$MANIFEST" 2>/dev/null || true)"
+fi
 
 # --- Apply fallbacks ---
 EFFECTIVE_TARGET="${NOTIFY_TARGET:-$FALLBACK_TARGET}"
@@ -158,13 +217,17 @@ fi
 
 # --- Send ---
 if [[ -z "$EFFECTIVE_TARGET" ]]; then
-  # No target — fall back to a system event so the AI sees it on next heartbeat
+  # No target — fall back to a system event so the AI sees it on next heartbeat.
+  # This is a terminal outcome (target won't appear later), so consume the stub
+  # to prevent infinite retries.
   if command -v openclaw &>/dev/null; then
     openclaw system event \
       --text "Task summary (no target): ${SUMMARY:-$TASK_ID}" \
       --mode now 2>/dev/null || true
   fi
-  err "no notifyTarget for $TASK_ID — fired system event as fallback"
+  _matching_stub="${STUB_PATH:-$PENDING_SUMMARIES_DIR/$TASK_ID.json}"
+  rm -f "$_matching_stub" 2>/dev/null || true
+  err "no notifyTarget for $TASK_ID — fired system event as fallback (stub cleared)"
   exit 3
 fi
 
@@ -182,9 +245,29 @@ fi
 # Send via openclaw. We pipe message via -m to avoid shell escaping issues.
 if openclaw message send "${CHANNEL_FLAG[@]}" -t "$EFFECTIVE_TARGET" -m "$MESSAGE" >/dev/null 2>&1; then
   log "delivered to ${EFFECTIVE_CHANNEL:-default}:${EFFECTIVE_TARGET} (task=$TASK_ID, ${#MESSAGE} bytes)"
+
+  # On successful delivery: mark manifest notifiedAt and remove any pending
+  # stub. Both operations are best-effort — delivery already succeeded, so
+  # failure here only means a future heartbeat may re-emit the summary
+  # (idempotent worst case). This is the atomic point that prevents lost
+  # summaries on partial failure.
+  if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
+    _now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    _tmp_m="$(mktemp)"
+    if jq --arg notifiedAt "$_now" '. + {notifiedAt: $notifiedAt}' "$MANIFEST" > "$_tmp_m" 2>/dev/null; then
+      mv "$_tmp_m" "$MANIFEST"
+    else
+      rm -f "$_tmp_m"
+    fi
+  fi
+  # Always clear matching stub (stub-mode: STUB_PATH; task-id mode: derived).
+  _matching_stub="${STUB_PATH:-$PENDING_SUMMARIES_DIR/$TASK_ID.json}"
+  rm -f "$_matching_stub" 2>/dev/null || true
+
   exit 0
 else
-  # Don't fail loudly — log and try a system event so it's not silently lost
+  # Don't fail loudly — log and try a system event so it's not silently lost.
+  # Stub (if any) is preserved so the next heartbeat retries delivery.
   err "openclaw message send failed for task=$TASK_ID target=$EFFECTIVE_TARGET — firing system event as fallback"
   openclaw system event \
     --text "Task summary delivery failed for ${SUMMARY:-$TASK_ID}; original target was $EFFECTIVE_TARGET" \

@@ -138,7 +138,8 @@ When a task fails and you decide to retry:
 | `--workdir PATH` | Working directory for the process (default: current dir) |
 | `--worktree PATH` | Git worktree path (for agent git progress tracking) |
 | `--prompt-file PATH` | File containing the prompt (piped to agent stdin) |
-| `--force` | Bypass the pre-launch memory gate (use with caution) |
+| `--permission-mode MODE` | Coding agents only: `bypassPermissions` (default — full access) or `acceptEdits`. Controls per-agent flags: claude → `--dangerously-skip-permissions` vs `--permission-mode acceptEdits`; codex → `danger-full-access` vs `--full-auto`; gemini → `-y` vs `--approval-mode auto_edit` |
+| `--force` | Bypass the pre-launch memory gate AND the `coding-agents.json enabled:false` gate (use with caution) |
 
 ### Metadata
 
@@ -199,7 +200,27 @@ Use the **check-on-task** skill or run directly:
 
 ## Posting Per-Task Summaries (HEARTBEAT)
 
-`post_task_summary` is the deterministic way to deliver an AI-composed summary back to the chat that originally launched a task. It reads `notifyTarget` and `channel` from the manifest — no JSON parsing, no remembering channel IDs.
+The heartbeat AI delivers interpretive summaries back to the chat that originally launched each task. There are two paths:
+
+### Stub queue (preferred — used by HEARTBEAT.md)
+
+When `cleanup_tasks` runs, it writes a structured summary stub for each completed/failed task that hasn't been delivered yet:
+
+```
+~/.openclaw/tasks/pending-summaries/<taskId>.json
+```
+
+A stub is self-contained — it has the routing (target/channel), the outcome (status/exitCode/note), the timing (durationStr), and pre-extracted output context (outputTail, agentLastText, agentStats). Read the stub, compose your interpretive text, then deliver:
+
+```bash
+post_task_summary --consume <STUB_PATH> --message "<INTERPRETIVE TEXT>"
+```
+
+`--consume` is **atomic**: on successful delivery it sets `notifiedAt` on the manifest AND removes the stub. On delivery failure the stub stays for the next heartbeat to retry. **Stub presence == delivery pending; stub absence == delivered or never queued.** No double-notify, no lost summaries.
+
+### Ad-hoc by task ID (back-compat)
+
+For one-off summaries (e.g., a task you launched yourself in the current session, not from the heartbeat queue):
 
 ```bash
 # By argument
@@ -215,7 +236,18 @@ echo "**Task failed:** OOM at 2GB" | post_task_summary --task-id <TASK_ID>
 post_task_summary --task-id <TASK_ID> --message "test" --dry-run
 ```
 
-Returns 0 on successful delivery, 2 if the manifest is missing, 3 if no target is recorded (falls back to a system event automatically). Failures never crash the heartbeat.
+The `--task-id` path also sets `notifiedAt` and clears any matching stub on success — so if cleanup_tasks had already queued the same task, the manual delivery short-circuits the heartbeat path.
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Delivered (or dry-run printed) |
+| 1 | Bad arguments / misuse |
+| 2 | Manifest or stub not found |
+| 3 | No notifyTarget — fired system event as fallback (stub cleared to prevent infinite retries) |
+
+Failures never crash the heartbeat.
 
 ## Defense in Depth: Task Monitoring
 
@@ -263,9 +295,10 @@ Before launching concurrent agents:
 
 ```
 ~/.openclaw/tasks/
-  active/        <- manifests for running processes
-  completed/     <- moved here on success
-  failed/        <- moved here on failure/crash
-  output/        <- stdout/stderr capture for ALL tasks
-  streams/       <- NDJSON streams for coding agents only
+  active/             <- manifests for running processes
+  completed/          <- moved here on success
+  failed/             <- moved here on failure/crash
+  output/             <- stdout/stderr capture for ALL tasks
+  streams/            <- NDJSON streams for coding agents only
+  pending-summaries/  <- AI-summary stubs awaiting delivery (consumed by post_task_summary --consume)
 ```

@@ -219,7 +219,7 @@ create_task_dirs() {
     return 0
   fi
 
-  mkdir -p "$TARGET_DIR/tasks"/{active,completed,failed,output,streams}
+  mkdir -p "$TARGET_DIR/tasks"/{active,completed,failed,output,streams,pending-summaries}
   echo -e "  ${GREEN}Created${NC} task directories in $TARGET_DIR/tasks/"
 }
 

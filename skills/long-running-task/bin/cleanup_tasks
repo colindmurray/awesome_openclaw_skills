@@ -38,6 +38,7 @@ COMPLETED_DIR="$TASKS_DIR/completed"
 FAILED_DIR="$TASKS_DIR/failed"
 OUTPUT_DIR="$TASKS_DIR/output"
 STREAMS_DIR="$TASKS_DIR/streams"
+PENDING_SUMMARIES_DIR="$TASKS_DIR/pending-summaries"
 
 # --- Defaults ---
 MAX_AGE=7             # days
@@ -58,7 +59,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Ensure directories exist
-mkdir -p "$ACTIVE_DIR" "$COMPLETED_DIR" "$FAILED_DIR" "$OUTPUT_DIR" "$STREAMS_DIR"
+mkdir -p "$ACTIVE_DIR" "$COMPLETED_DIR" "$FAILED_DIR" "$OUTPUT_DIR" "$STREAMS_DIR" "$PENDING_SUMMARIES_DIR"
 
 ACTIONS_TAKEN=0
 
@@ -94,6 +95,141 @@ notify_task() {
   fi
 }
 
+# write_summary_stub — emit a structured per-task summary stub for the AI heartbeat.
+#
+# Stubs live in pending-summaries/ and are consumed by post_task_summary --consume.
+# Self-contained so the AI can compose interpretive text without re-reading the
+# manifest or output. Idempotent: returns 1 if a stub already exists for the task.
+#
+# Schema is purpose-built for "AI composes interpretive summary":
+#   schemaVersion, taskId, manifestPath, status, summary, exitCode, type, agent,
+#   startedAt, endedAt, durationStr, channel, notifyTarget, sessionId,
+#   outputTail, agentLastText, agentStats, failureNote, worktree, monitorDetected,
+#   createdAt
+write_summary_stub() {
+  local manifest="$1"
+  local status_label="$2"   # "completed" or "failed" (lowercase)
+  local task_id="$3"
+
+  local stub_path="$PENDING_SUMMARIES_DIR/$task_id.json"
+
+  # Idempotent: don't overwrite an existing stub.
+  if [[ -f "$stub_path" ]]; then
+    return 1
+  fi
+
+  local summary started_at ended_at exit_code type agent channel notify_target session_id output_file stream_file note worktree monitor_detected
+  summary="$(jq -r '.summary // "unknown task"' "$manifest" 2>/dev/null)"
+  started_at="$(jq -r '.startedAt // empty' "$manifest" 2>/dev/null)"
+  ended_at="$(jq -r '.completedAt // .failedAt // empty' "$manifest" 2>/dev/null)"
+  exit_code="$(jq -r '.exitCode // empty' "$manifest" 2>/dev/null)"
+  type="$(jq -r '.type // "command"' "$manifest" 2>/dev/null)"
+  agent="$(jq -r '.agent // empty' "$manifest" 2>/dev/null)"
+  channel="$(jq -r '.channel // empty' "$manifest" 2>/dev/null)"
+  notify_target="$(jq -r '.notifyTarget // empty' "$manifest" 2>/dev/null)"
+  session_id="$(jq -r '.sessionId // empty' "$manifest" 2>/dev/null)"
+  output_file="$(jq -r '.outputFile // empty' "$manifest" 2>/dev/null)"
+  stream_file="$(jq -r '.streamFile // empty' "$manifest" 2>/dev/null)"
+  note="$(jq -r '.note // empty' "$manifest" 2>/dev/null)"
+  worktree="$(jq -r '.worktree // empty' "$manifest" 2>/dev/null)"
+  monitor_detected="$(jq -r '.monitorDetected // false' "$manifest" 2>/dev/null)"
+
+  # Compute human-readable duration.
+  local duration_str=""
+  if [[ -n "$started_at" && -n "$ended_at" ]]; then
+    local s e d h m
+    s="$(parse_date_to_epoch "$started_at" 2>/dev/null || echo 0)"
+    e="$(parse_date_to_epoch "$ended_at" 2>/dev/null || echo 0)"
+    if [[ "$s" -gt 0 && "$e" -gt 0 ]]; then
+      d=$((e - s))
+      h=$((d / 3600)); m=$(( (d % 3600) / 60 ))
+      if [[ $h -gt 0 ]]; then duration_str="${h}h ${m}m"; else duration_str="${m}m $(( d % 60 ))s"; fi
+    fi
+  fi
+
+  # Output tail (capped to keep stub small).
+  local output_tail=""
+  if [[ -n "$output_file" && -f "$output_file" ]]; then
+    output_tail="$(tail -20 "$output_file" 2>/dev/null | head -c 1500 || true)"
+  fi
+
+  # Coding-agent extras.
+  local agent_last_text=""
+  local agent_stats_json="null"
+  if [[ "$type" == "coding-agent" && -n "$stream_file" && -f "$stream_file" ]]; then
+    local tc ec hr
+    tc="$(grep -c '"type":"tool_use"' "$stream_file" 2>/dev/null || echo 0)"
+    ec="$(grep -c '"is_error":true' "$stream_file" 2>/dev/null || echo 0)"
+    hr="$(grep -c '"type":"result"' "$stream_file" 2>/dev/null || echo 0)"
+    agent_stats_json="$(jq -nc --argjson tc "${tc:-0}" --argjson ec "${ec:-0}" --argjson hr "${hr:-0}" \
+      '{toolCalls: $tc, errors: $ec, resultEvent: ($hr > 0)}')"
+    agent_last_text="$(grep '"type":"assistant"' "$stream_file" 2>/dev/null | tail -1 | python3 -c "
+import sys, json
+try:
+    d = json.loads(sys.stdin.readline())
+    msg = d.get('message', {})
+    for block in msg.get('content', []):
+        if block.get('type') == 'text':
+            print(block['text'][:1500])
+            break
+except Exception:
+    pass
+" 2>/dev/null || true)"
+  fi
+
+  local now
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  local tmp_stub
+  tmp_stub="$(mktemp)"
+  jq -n \
+    --arg taskId "$task_id" \
+    --arg manifestPath "$manifest" \
+    --arg status "$status_label" \
+    --arg summary "$summary" \
+    --arg exitCode "$exit_code" \
+    --arg type "$type" \
+    --arg agent "$agent" \
+    --arg startedAt "$started_at" \
+    --arg endedAt "$ended_at" \
+    --arg durationStr "$duration_str" \
+    --arg channel "$channel" \
+    --arg notifyTarget "$notify_target" \
+    --arg sessionId "$session_id" \
+    --arg outputTail "$output_tail" \
+    --arg agentLastText "$agent_last_text" \
+    --argjson agentStats "$agent_stats_json" \
+    --arg failureNote "$note" \
+    --arg worktree "$worktree" \
+    --argjson monitorDetected "$monitor_detected" \
+    --arg createdAt "$now" \
+    '{
+      schemaVersion: 1,
+      taskId: $taskId,
+      manifestPath: $manifestPath,
+      status: $status,
+      summary: $summary,
+      exitCode: ($exitCode | tonumber? // null),
+      type: $type,
+      agent: (if $agent == "" then null else $agent end),
+      startedAt: (if $startedAt == "" then null else $startedAt end),
+      endedAt: (if $endedAt == "" then null else $endedAt end),
+      durationStr: (if $durationStr == "" then null else $durationStr end),
+      channel: (if $channel == "" then null else $channel end),
+      notifyTarget: (if $notifyTarget == "" then null else $notifyTarget end),
+      sessionId: (if $sessionId == "" then null else $sessionId end),
+      outputTail: $outputTail,
+      agentLastText: (if $agentLastText == "" then null else $agentLastText end),
+      agentStats: $agentStats,
+      failureNote: (if $failureNote == "" then null else $failureNote end),
+      worktree: (if $worktree == "" then null else $worktree end),
+      monitorDetected: $monitorDetected,
+      createdAt: $createdAt
+    }' > "$tmp_stub" 2>/dev/null && mv "$tmp_stub" "$stub_path" || rm -f "$tmp_stub"
+
+  return 0
+}
+
 # --- 1. Dead PID detection ---
 echo "[cleanup] Scanning active tasks for dead PIDs..."
 for manifest in "$ACTIVE_DIR"/*.json; do
@@ -122,6 +258,23 @@ for manifest in "$ACTIVE_DIR"/*.json; do
   fi
 
   if [[ -z "$pid" || "$pid" == "null" ]]; then
+    # Manifest has no PID. The launcher always sets pid before exiting heartbeat
+    # mode, so this is either a brand-new task mid-launch or a malformed
+    # manifest. Allow a 60s grace window for the launcher to finish, then
+    # quarantine to failed/ with a note.
+    started_at="$(jq -r '.startedAt // empty' "$manifest" 2>/dev/null)"
+    started_epoch="$(parse_date_to_epoch "$started_at" 2>/dev/null || echo 0)"
+    age=$(( $(date +%s) - started_epoch ))
+    if [[ "$started_epoch" -gt 0 && "$age" -gt 60 ]]; then
+      now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      jq --arg failedAt "$now" --argjson exitCode -1 --arg note "Manifest has no pid field after $age seconds — launcher likely crashed before update_pid" \
+        '. + {failedAt: $failedAt, exitCode: $exitCode, note: $note}' \
+        "$manifest" > "$FAILED_DIR/$task_id.json" 2>/dev/null || true
+      rm -f "$manifest"
+      notify_task "Quarantined no-pid manifest: $summary (id: $task_id, age ${age}s)" \
+        "$task_notify_target" "$task_notify_channel"
+      ACTIONS_TAKEN=$((ACTIONS_TAKEN + 1))
+    fi
     continue
   fi
 
@@ -242,11 +395,23 @@ report_unnotified() {
 
     [[ -z "$task_id" ]] && continue
 
+    # Skip if a summary stub is already pending — the AI hasn't consumed it yet.
+    # This makes cleanup_tasks idempotent across runs: stub existence == pending.
+    if [[ -f "$PENDING_SUMMARIES_DIR/$task_id.json" ]]; then
+      continue
+    fi
+
     PENDING_NOTIFICATIONS=$((PENDING_NOTIFICATIONS + 1))
 
-    # Print structured report for the heartbeat agent to relay.
-    # The Target/Channel/Session lines let post_task_summary route the AI's
-    # interpretive summary back to the chat that originally launched the task.
+    # Write the structured summary stub. The AI heartbeat lists this directory,
+    # composes interpretive text per stub, and calls
+    # `post_task_summary --consume <stub>` which atomically delivers and clears
+    # the stub. Delivery failure leaves the stub for the next heartbeat to retry.
+    write_summary_stub "$manifest" "${status_label,,}" "$task_id" || true
+
+    # Also print a structured text report for human eyes / debugging. The AI
+    # should drive from stubs (deterministic) but the text block is preserved
+    # so a human reading cleanup output sees the same info.
     echo ""
     echo "=== TASK $status_label: $task_id ==="
     echo "Summary: $summary"
@@ -318,16 +483,11 @@ except:
 
     echo "=== END $task_id ==="
 
-    # Mark as notified
-    local now
-    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    local tmp_m
-    tmp_m="$(mktemp)"
-    if jq --arg notifiedAt "$now" '. + {notifiedAt: $notifiedAt}' "$manifest" > "$tmp_m" 2>/dev/null; then
-      mv "$tmp_m" "$manifest"
-    else
-      rm -f "$tmp_m"
-    fi
+    # NOTE: notifiedAt is intentionally NOT set here. The summary stub we just
+    # wrote is the new source of truth for "delivery pending". When the AI
+    # consumes the stub via post_task_summary --consume, that path sets
+    # notifiedAt atomically with the delivery. If delivery fails, the stub
+    # stays and the next heartbeat retries — no lost summaries.
 
     ACTIONS_TAKEN=$((ACTIONS_TAKEN + 1))
   done
@@ -364,6 +524,9 @@ prune_dir "$COMPLETED_DIR" "*.json"
 prune_dir "$FAILED_DIR" "*.json"
 prune_dir "$OUTPUT_DIR" "*.log"
 prune_dir "$STREAMS_DIR" "*.ndjson"
+# Prune abandoned summary stubs (e.g., AI never came back to consume them).
+# Stubs younger than max-age are preserved so a returning AI sees pending work.
+prune_dir "$PENDING_SUMMARIES_DIR" "*.json"
 
 # Also prune legacy /tmp markers
 while IFS= read -r -d '' f; do

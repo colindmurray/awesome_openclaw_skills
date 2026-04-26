@@ -124,9 +124,10 @@ COMPLETED_DIR="$TASKS_DIR/completed"
 FAILED_DIR="$TASKS_DIR/failed"
 OUTPUT_DIR="$TASKS_DIR/output"
 STREAMS_DIR="$TASKS_DIR/streams"
+PENDING_SUMMARIES_DIR="$TASKS_DIR/pending-summaries"
 
 # Ensure directories exist
-mkdir -p "$ACTIVE_DIR" "$COMPLETED_DIR" "$FAILED_DIR" "$OUTPUT_DIR" "$STREAMS_DIR"
+mkdir -p "$ACTIVE_DIR" "$COMPLETED_DIR" "$FAILED_DIR" "$OUTPUT_DIR" "$STREAMS_DIR" "$PENDING_SUMMARIES_DIR"
 
 # --- Defaults ---
 MODE=""
@@ -216,6 +217,30 @@ if [[ "$TYPE" == "coding-agent" ]]; then
       echo "api_key"
     fi
   }
+
+  # --- Enforce coding-agents.json `enabled` flag ---
+  # If the requested agent has enabled:false, refuse to launch (use --force to bypass).
+  # Default when key is missing or file absent: enabled (preserves old behavior).
+  _resolve_agent_enabled() {
+    local agent_name="$1"
+    local config_file="${OPENCLAW_CODING_AGENTS_FILE:-${OPENCLAW_DIR:-$HOME/.openclaw}/coding-agents.json}"
+    # jq's `//` treats false as falsy, so an explicit `if` is required to
+    # distinguish "key absent" (default true) from "key set to false".
+    if [[ -f "$config_file" ]] && command -v jq &>/dev/null; then
+      jq -r "if (.agents | has(\"$agent_name\")) and (.agents.\"$agent_name\" | has(\"enabled\")) then .agents.\"$agent_name\".enabled else true end" "$config_file" 2>/dev/null || echo "true"
+    else
+      echo "true"
+    fi
+  }
+  if [[ "$FORCE_LAUNCH" != true ]]; then
+    enabled_state="$(_resolve_agent_enabled "$AGENT")"
+    if [[ "$enabled_state" != "true" ]]; then
+      echo "Error: coding agent '$AGENT' is disabled in coding-agents.json (enabled:false)." >&2
+      echo "  Override:  re-run with --force to bypass this check" >&2
+      echo "  Configure: set agents.$AGENT.enabled=true in ${OPENCLAW_CODING_AGENTS_FILE:-${OPENCLAW_DIR:-$HOME/.openclaw}/coding-agents.json}" >&2
+      exit 1
+    fi
+  fi
 
   case "$AGENT" in
     claude)
@@ -680,8 +705,12 @@ run_task() {
 
 # --- Launch mode ---
 if [[ "$MODE" == "heartbeat" ]]; then
-  # Background mode: run in a subshell, disown, print info
+  # Background mode: run in a subshell, disown, print info.
+  # `trap "" HUP` makes the subshell ignore SIGHUP so it survives the parent
+  # process exiting (terminal close, AI bash-tool timeout, ssh disconnect, etc.).
+  # `disown` removes from the launcher's job table for clean exit.
   (
+    trap '' HUP
     run_task
   ) &
   BG_PID=$!
@@ -693,6 +722,7 @@ if [[ "$MODE" == "heartbeat" ]]; then
 
   # --- Launch monitor watchdog (survives if task subshell dies) ---
   (
+    trap '' HUP
     monitor_pid "$BG_PID" "$TASK_ID" "$MANIFEST" "$SUMMARY" "$OUTPUT_FILE" "$STARTED_AT"
   ) &
   MONITOR_PID=$!
