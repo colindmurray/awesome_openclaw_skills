@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# post_task_summary — route a per-task summary message to the channel that
+# originally launched the task.
+#
+# The HEARTBEAT.md flow uses this script so the AI never has to parse manifest
+# JSON or remember which channel each task belongs to. Reads notifyTarget and
+# channel directly from the task manifest in active/, completed/, or failed/.
+#
+# Usage:
+#   post_task_summary --task-id ID --message "TEXT"
+#   post_task_summary --task-id ID --message-file PATH
+#   echo "TEXT" | post_task_summary --task-id ID
+#   post_task_summary --task-id ID --message "TEXT" --dry-run
+#
+# Exit codes:
+#   0  message routed (or dry-run printed)
+#   1  bad arguments
+#   2  task manifest not found
+#   3  no notifyTarget AND no fallback channel available
+#
+# Defensive design: failure to deliver NEVER fails the heartbeat. Use --quiet to
+# suppress non-error output. The script exits non-zero only on hard misuse.
+
+# --- Ensure user paths are available (cron / non-interactive shells) ---
+for _d in "$HOME/.local/bin" "$HOME/bin"; do
+  [[ -d "$_d" && ":$PATH:" != *":$_d:"* ]] && PATH="$_d:$PATH"
+done
+if [[ -s "$HOME/.nvm/nvm.sh" ]]; then
+  export NVM_DIR="$HOME/.nvm"
+  source "$NVM_DIR/nvm.sh" 2>/dev/null || true
+fi
+export PATH
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TASKS_DIR="$HOME/.openclaw/tasks"
+ACTIVE_DIR="$TASKS_DIR/active"
+COMPLETED_DIR="$TASKS_DIR/completed"
+FAILED_DIR="$TASKS_DIR/failed"
+
+TASK_ID=""
+MESSAGE=""
+MESSAGE_FILE=""
+DRY_RUN=false
+QUIET=false
+FALLBACK_TARGET=""
+FALLBACK_CHANNEL=""
+
+usage() {
+  sed -n '4,18p' "$0" >&2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --task-id)          TASK_ID="$2"; shift 2 ;;
+    --message|-m)       MESSAGE="$2"; shift 2 ;;
+    --message-file|-f)  MESSAGE_FILE="$2"; shift 2 ;;
+    --fallback-target)  FALLBACK_TARGET="$2"; shift 2 ;;
+    --fallback-channel) FALLBACK_CHANNEL="$2"; shift 2 ;;
+    --dry-run)          DRY_RUN=true; shift ;;
+    --quiet|-q)         QUIET=true; shift ;;
+    --help|-h)          usage; exit 0 ;;
+    *)
+      echo "Unknown flag: $1" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+log() {
+  [[ "$QUIET" == true ]] && return 0
+  echo "[post_task_summary] $*"
+}
+
+err() {
+  echo "[post_task_summary] error: $*" >&2
+}
+
+if [[ -z "$TASK_ID" ]]; then
+  err "--task-id is required"
+  usage
+  exit 1
+fi
+
+# --- Resolve message body ---
+if [[ -n "$MESSAGE" && -n "$MESSAGE_FILE" ]]; then
+  err "--message and --message-file are mutually exclusive"
+  exit 1
+fi
+if [[ -n "$MESSAGE_FILE" ]]; then
+  if [[ ! -f "$MESSAGE_FILE" ]]; then
+    err "message file not found: $MESSAGE_FILE"
+    exit 1
+  fi
+  MESSAGE="$(cat "$MESSAGE_FILE")"
+fi
+if [[ -z "$MESSAGE" ]]; then
+  # Try stdin if it's piped
+  if [[ ! -t 0 ]]; then
+    MESSAGE="$(cat)"
+  fi
+fi
+if [[ -z "$MESSAGE" ]]; then
+  err "no message provided (use --message, --message-file, or stdin)"
+  exit 1
+fi
+
+# --- Locate manifest ---
+MANIFEST=""
+for _dir in "$ACTIVE_DIR" "$COMPLETED_DIR" "$FAILED_DIR"; do
+  if [[ -f "$_dir/$TASK_ID.json" ]]; then
+    MANIFEST="$_dir/$TASK_ID.json"
+    break
+  fi
+done
+
+if [[ -z "$MANIFEST" ]]; then
+  err "no manifest found for task: $TASK_ID (searched active/, completed/, failed/)"
+  exit 2
+fi
+
+if ! command -v jq &>/dev/null; then
+  err "jq is required but not installed"
+  exit 1
+fi
+
+# --- Read routing fields from manifest ---
+NOTIFY_TARGET="$(jq -r '.notifyTarget // empty' "$MANIFEST" 2>/dev/null || true)"
+CHANNEL="$(jq -r '.channel // empty' "$MANIFEST" 2>/dev/null || true)"
+SUMMARY="$(jq -r '.summary // empty' "$MANIFEST" 2>/dev/null || true)"
+
+# --- Apply fallbacks ---
+EFFECTIVE_TARGET="${NOTIFY_TARGET:-$FALLBACK_TARGET}"
+EFFECTIVE_CHANNEL="${CHANNEL:-$FALLBACK_CHANNEL}"
+
+# --- resolve_channel may add an env-var fallback ---
+if [[ -z "$EFFECTIVE_TARGET" && -x "$SCRIPT_DIR/resolve_channel" ]]; then
+  EFFECTIVE_TARGET="$("$SCRIPT_DIR/resolve_channel" 2>/dev/null || true)"
+fi
+
+# --- Dry-run report ---
+if [[ "$DRY_RUN" == true ]]; then
+  echo "task_id:        $TASK_ID"
+  echo "manifest:       $MANIFEST"
+  echo "summary:        ${SUMMARY:-<none>}"
+  echo "notifyTarget:   ${NOTIFY_TARGET:-<unset>}"
+  echo "channel:        ${CHANNEL:-<unset>}"
+  echo "effective_target:  ${EFFECTIVE_TARGET:-<none — would fall back to system event>}"
+  echo "effective_channel: ${EFFECTIVE_CHANNEL:-<none>}"
+  echo "message_bytes:  ${#MESSAGE}"
+  echo "--- message ---"
+  echo "$MESSAGE"
+  echo "--- end message ---"
+  exit 0
+fi
+
+# --- Send ---
+if [[ -z "$EFFECTIVE_TARGET" ]]; then
+  # No target — fall back to a system event so the AI sees it on next heartbeat
+  if command -v openclaw &>/dev/null; then
+    openclaw system event \
+      --text "Task summary (no target): ${SUMMARY:-$TASK_ID}" \
+      --mode now 2>/dev/null || true
+  fi
+  err "no notifyTarget for $TASK_ID — fired system event as fallback"
+  exit 3
+fi
+
+if ! command -v openclaw &>/dev/null; then
+  err "openclaw CLI not on PATH — cannot deliver"
+  exit 1
+fi
+
+# Build channel flag (channel is optional; openclaw can default)
+CHANNEL_FLAG=()
+if [[ -n "$EFFECTIVE_CHANNEL" ]]; then
+  CHANNEL_FLAG=(--channel "$EFFECTIVE_CHANNEL")
+fi
+
+# Send via openclaw. We pipe message via -m to avoid shell escaping issues.
+if openclaw message send "${CHANNEL_FLAG[@]}" -t "$EFFECTIVE_TARGET" -m "$MESSAGE" >/dev/null 2>&1; then
+  log "delivered to ${EFFECTIVE_CHANNEL:-default}:${EFFECTIVE_TARGET} (task=$TASK_ID, ${#MESSAGE} bytes)"
+  exit 0
+else
+  # Don't fail loudly — log and try a system event so it's not silently lost
+  err "openclaw message send failed for task=$TASK_ID target=$EFFECTIVE_TARGET — firing system event as fallback"
+  openclaw system event \
+    --text "Task summary delivery failed for ${SUMMARY:-$TASK_ID}; original target was $EFFECTIVE_TARGET" \
+    --mode now 2>/dev/null || true
+  exit 3
+fi

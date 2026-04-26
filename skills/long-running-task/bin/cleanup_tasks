@@ -70,6 +70,30 @@ notify() {
   echo "[cleanup] $message"
 }
 
+# notify_task — route a notification to a specific task's origin channel,
+# falling back to the system-event path if no per-task target is recorded.
+# Mirrors the monitor_task per-task delivery pattern so dead-PID detection in
+# the slow-path heartbeat reaches the same channel as the fast-path monitor.
+notify_task() {
+  local message="$1"
+  local target="$2"
+  local task_channel="$3"
+
+  local resolved=""
+  if [[ -n "$target" ]] && [[ -x "$SCRIPT_DIR/resolve_channel" ]]; then
+    resolved="$("$SCRIPT_DIR/resolve_channel" "$target" 2>/dev/null || true)"
+  fi
+
+  if [[ -n "$resolved" ]] && command -v openclaw &>/dev/null; then
+    local cf=()
+    [[ -n "$task_channel" ]] && cf=(--channel "$task_channel")
+    openclaw message send "${cf[@]}" -t "$resolved" -m "$message" 2>/dev/null || true
+    echo "[cleanup] notified ${task_channel:-default}:${resolved}: $(echo "$message" | head -1)"
+  else
+    notify "$message"
+  fi
+}
+
 # --- 1. Dead PID detection ---
 echo "[cleanup] Scanning active tasks for dead PIDs..."
 for manifest in "$ACTIVE_DIR"/*.json; do
@@ -87,6 +111,8 @@ for manifest in "$ACTIVE_DIR"/*.json; do
   pid="$(jq -r '.pid // empty' "$manifest" 2>/dev/null)"
   summary="$(jq -r '.summary // "unknown task"' "$manifest" 2>/dev/null)"
   monitor_pid_val="$(jq -r '.monitorPid // empty' "$manifest" 2>/dev/null)"
+  task_notify_target="$(jq -r '.notifyTarget // empty' "$manifest" 2>/dev/null)"
+  task_notify_channel="$(jq -r '.channel // empty' "$manifest" 2>/dev/null)"
 
   if [[ -z "$task_id" ]]; then
     echo "[cleanup] Removing unparseable manifest: $(basename "$manifest")"
@@ -127,7 +153,10 @@ for manifest in "$ACTIVE_DIR"/*.json; do
       kill "$monitor_pid_val" 2>/dev/null || true
     fi
 
-    notify "Dead task detected: $summary (id: $task_id, PID $pid was not running)"
+    # Route to the task's origin channel (mirrors monitor_task), falling back
+    # to a system event if no per-task target was recorded.
+    notify_task "Dead task detected: $summary (id: $task_id, PID $pid was not running)" \
+      "$task_notify_target" "$task_notify_channel"
     ACTIONS_TAKEN=$((ACTIONS_TAKEN + 1))
   fi
 done
@@ -140,6 +169,8 @@ for manifest in "$ACTIVE_DIR"/*.json; do
   task_id="$(jq -r '.taskId // empty' "$manifest" 2>/dev/null)"
   summary="$(jq -r '.summary // "unknown task"' "$manifest" 2>/dev/null)"
   output_file="$(jq -r '.outputFile // empty' "$manifest" 2>/dev/null)"
+  task_notify_target="$(jq -r '.notifyTarget // empty' "$manifest" 2>/dev/null)"
+  task_notify_channel="$(jq -r '.channel // empty' "$manifest" 2>/dev/null)"
 
   if [[ -z "$output_file" || ! -f "$output_file" ]]; then
     continue
@@ -153,7 +184,8 @@ for manifest in "$ACTIVE_DIR"/*.json; do
   if [[ "$age" -gt "$STALL_THRESHOLD" ]]; then
     hours=$((age / 3600))
     mins=$(( (age % 3600) / 60 ))
-    notify "Stall warning: '$summary' (id: $task_id) — no output for ${hours}h ${mins}m"
+    notify_task "Stall warning: '$summary' (id: $task_id) — no output for ${hours}h ${mins}m" \
+      "$task_notify_target" "$task_notify_channel"
     ACTIONS_TAKEN=$((ACTIONS_TAKEN + 1))
   fi
 done
@@ -193,7 +225,7 @@ report_unnotified() {
       continue
     fi
 
-    local task_id summary exit_code output_file stream_file started_at ended_at worktree type agent
+    local task_id summary exit_code output_file stream_file started_at ended_at worktree type agent notify_target task_channel session_id
     task_id="$(jq -r '.taskId // empty' "$manifest" 2>/dev/null)"
     summary="$(jq -r '.summary // "unknown task"' "$manifest" 2>/dev/null)"
     exit_code="$(jq -r '.exitCode // "unknown"' "$manifest" 2>/dev/null)"
@@ -204,12 +236,17 @@ report_unnotified() {
     worktree="$(jq -r '.worktree // empty' "$manifest" 2>/dev/null)"
     type="$(jq -r '.type // "command"' "$manifest" 2>/dev/null)"
     agent="$(jq -r '.agent // empty' "$manifest" 2>/dev/null)"
+    notify_target="$(jq -r '.notifyTarget // empty' "$manifest" 2>/dev/null)"
+    task_channel="$(jq -r '.channel // empty' "$manifest" 2>/dev/null)"
+    session_id="$(jq -r '.sessionId // empty' "$manifest" 2>/dev/null)"
 
     [[ -z "$task_id" ]] && continue
 
     PENDING_NOTIFICATIONS=$((PENDING_NOTIFICATIONS + 1))
 
-    # Print structured report for the heartbeat agent to relay
+    # Print structured report for the heartbeat agent to relay.
+    # The Target/Channel/Session lines let post_task_summary route the AI's
+    # interpretive summary back to the chat that originally launched the task.
     echo ""
     echo "=== TASK $status_label: $task_id ==="
     echo "Summary: $summary"
@@ -217,6 +254,9 @@ report_unnotified() {
     echo "Type: $type${agent:+ ($agent)}"
     echo "Started: $started_at"
     echo "Ended: $ended_at"
+    echo "Target: ${notify_target:-<none>}"
+    echo "Channel: ${task_channel:-<none>}"
+    echo "Session: ${session_id:-<none>}"
 
     # Extract output summary
     if [[ -n "$output_file" && -f "$output_file" ]]; then

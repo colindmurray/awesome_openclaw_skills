@@ -274,13 +274,14 @@ if [[ "$TYPE" == "coding-agent" ]]; then
       fi
       ;;
     codex)
-      # Build sandbox flags based on --permission-mode
+      # Codex 0.125+ requires sandbox/json flags AFTER the `exec` subcommand.
+      # Putting them before `exec` produces: "unexpected argument '--json' found".
       case "$PERMISSION_MODE" in
         acceptEdits)
-          EXEC_COMMAND="codex --full-auto --json exec"
+          EXEC_COMMAND="codex exec --full-auto --json"
           ;;
         bypassPermissions|*)
-          EXEC_COMMAND="codex -s danger-full-access --dangerously-bypass-approvals-and-sandbox --json exec"
+          EXEC_COMMAND="codex exec -s danger-full-access --dangerously-bypass-approvals-and-sandbox --json"
           ;;
       esac
       if [[ -n "$PROMPT_FILE" ]]; then

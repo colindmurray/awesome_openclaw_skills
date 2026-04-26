@@ -1,12 +1,18 @@
 ---
 name: long-running-task
-description: Launch and manage ANY background process — coding agents, system commands, disk repairs, test suites, deployments. Unified manifest system with PID tracking, output capture, stall detection, and discoverability.
+description: Use when launching any background process expected to take more than ~5 minutes — coding agents, system commands, disk repairs, test suites, deployments. Pair with check-on-task for status checks. Tasks notify their origin channel on start/complete/fail/die.
 metadata: {"openclaw":{"emoji":"⏳","requires":{"anyBins":["jq"]}}}
 ---
 
 # Long-Running Task System
 
 Unified background process management. Every background task — agent or not — gets manifests, PID tracking, output capture, stall detection, and discoverability.
+
+## Channel Attribution (Read SESSION_CONTEXT.md First)
+
+If `SESSION_CONTEXT.md` is in your bootstrap context (it is, on every OpenClaw agent run), it lists `Target ID`, `Channel`, and `Session ID` for the chat that's talking to you right now. **Pass these into every `execute_long_running_task` invocation** via `--target`, `--channel`, `--session-id`. The script writes them into the task manifest, and each lifecycle event (started, completed, failed, died) auto-routes a notification back to that same chat. The `post_task_summary` helper uses the same recorded fields to deliver heartbeat-time interpretive summaries to the right channel.
+
+If a task lacks `--target`, the heartbeat falls back to a system event — visible to the AI on the next heartbeat tick, but not visible to the user in their original chat thread.
 
 ## Quick Start Templates
 
@@ -190,6 +196,26 @@ Use the **check-on-task** skill or run directly:
 ~/.openclaw/skills/long-running-task/bin/check_task --session-id <SESSION_ID>
 ~/.openclaw/skills/long-running-task/bin/check_task --all
 ```
+
+## Posting Per-Task Summaries (HEARTBEAT)
+
+`post_task_summary` is the deterministic way to deliver an AI-composed summary back to the chat that originally launched a task. It reads `notifyTarget` and `channel` from the manifest — no JSON parsing, no remembering channel IDs.
+
+```bash
+# By argument
+post_task_summary --task-id <TASK_ID> --message "**Task completed:** ..."
+
+# By file (preferred for long messages)
+post_task_summary --task-id <TASK_ID> --message-file /tmp/summary.md
+
+# By stdin
+echo "**Task failed:** OOM at 2GB" | post_task_summary --task-id <TASK_ID>
+
+# Verify routing without sending
+post_task_summary --task-id <TASK_ID> --message "test" --dry-run
+```
+
+Returns 0 on successful delivery, 2 if the manifest is missing, 3 if no target is recorded (falls back to a system event automatically). Failures never crash the heartbeat.
 
 ## Defense in Depth: Task Monitoring
 
