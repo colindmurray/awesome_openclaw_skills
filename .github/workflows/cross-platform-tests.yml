@@ -21,6 +21,7 @@ jobs:
       - name: Ensure scripts are executable
         run: |
           chmod +x tests/test_platform_helpers.sh
+          chmod +x tests/test_installer.sh
           chmod +x lib/platform_helpers
           chmod +x install.sh
           for f in skills/*/bin/*; do
@@ -29,6 +30,9 @@ jobs:
 
       - name: Run platform_helpers test suite
         run: bash tests/test_platform_helpers.sh
+
+      - name: Run installer regression suite
+        run: bash tests/test_installer.sh
 
       - name: Test install.sh --help
         run: |
@@ -99,4 +103,4 @@ jobs:
           exit $EXIT
 
       - name: ShellCheck test scripts
-        run: shellcheck -s bash -S warning -e SC1091,SC1090 tests/test_platform_helpers.sh
+        run: shellcheck -s bash -S warning -e SC1091,SC1090 tests/test_platform_helpers.sh tests/test_installer.sh
