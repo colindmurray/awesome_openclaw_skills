@@ -53,7 +53,7 @@ jobs:
           FOUND=0
 
           # Check for ${var,,} pattern which fails on bash 3.2 (macOS default)
-          if grep -rn '\${[a-zA-Z_]*,,}' lib/ skills/ install.sh 2>/dev/null; then
+          if git grep -n '\${[a-zA-Z_]*,,}' -- lib skills install.sh; then
             echo 'FAIL: Found bash 4+ only ${var,,} syntax'
             FOUND=1
           else
@@ -61,7 +61,7 @@ jobs:
           fi
 
           # Check for ${var^^} pattern
-          if grep -rn '\${[a-zA-Z_]*\^\^}' lib/ skills/ install.sh 2>/dev/null; then
+          if git grep -n '\${[a-zA-Z_]*\^\^}' -- lib skills install.sh; then
             echo 'FAIL: Found bash 4+ only ${var^^} syntax'
             FOUND=1
           else
@@ -69,7 +69,7 @@ jobs:
           fi
 
           # Check for associative arrays (declare -A)
-          if grep -rn 'declare -A' lib/ skills/ install.sh 2>/dev/null; then
+          if git grep -n 'declare -A' -- lib skills install.sh; then
             echo 'FAIL: Found bash 4+ only associative arrays'
             FOUND=1
           else
