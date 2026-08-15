@@ -299,11 +299,7 @@ determine_death_cause() {
 
 # Convert string to lowercase. Works on bash 3.2+ (macOS default bash).
 to_lowercase() {
-  if [[ "${BASH_VERSINFO[0]}" -ge 4 ]]; then
-    echo "${1,,}"
-  else
-    echo "$1" | tr '[:upper:]' '[:lower:]'
-  fi
+  echo "$1" | tr '[:upper:]' '[:lower:]'
 }
 
 # --- Platform info ---

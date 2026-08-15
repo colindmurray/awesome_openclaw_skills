@@ -350,6 +350,8 @@ PENDING_NOTIFICATIONS=0
 report_unnotified() {
   local dir="$1"
   local status_label="$2"
+  local status_label_lc
+  status_label_lc="$(printf '%s' "$status_label" | tr '[:upper:]' '[:lower:]')"
 
   for manifest in "$dir"/*.json; do
     [[ -f "$manifest" && -s "$manifest" ]] || continue
@@ -407,7 +409,7 @@ report_unnotified() {
     # composes interpretive text per stub, and calls
     # `post_task_summary --consume <stub>` which atomically delivers and clears
     # the stub. Delivery failure leaves the stub for the next heartbeat to retry.
-    write_summary_stub "$manifest" "${status_label,,}" "$task_id" || true
+    write_summary_stub "$manifest" "$status_label_lc" "$task_id" || true
 
     # Also print a structured text report for human eyes / debugging. The AI
     # should drive from stubs (deterministic) but the text block is preserved

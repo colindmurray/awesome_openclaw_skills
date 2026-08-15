@@ -8,11 +8,18 @@ on:
 
 jobs:
   test:
+    name: Platform tests (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+        include:
+          - os: ubuntu-latest
+            runner_labels: '["ubuntu-latest"]'
+          # Keep the macOS leg on the shared local Apple Silicon runner so
+          # this test exercises the system Bash and platform behavior directly.
+          - os: macOS (local sandbox)
+            runner_labels: '["self-hosted","macOS","ARM64","awesome-openclaw-skills-macos"]'
+    runs-on: ${{ fromJSON(matrix.runner_labels) }}
 
     steps:
       - name: Checkout
@@ -46,7 +53,7 @@ jobs:
           FOUND=0
 
           # Check for ${var,,} pattern which fails on bash 3.2 (macOS default)
-          if grep -rn '\${[a-zA-Z_]*,,}' lib/ skills/ install.sh 2>/dev/null; then
+          if git grep -n '\${[a-zA-Z_]*,,}' HEAD -- lib skills install.sh; then
             echo 'FAIL: Found bash 4+ only ${var,,} syntax'
             FOUND=1
           else
@@ -54,7 +61,7 @@ jobs:
           fi
 
           # Check for ${var^^} pattern
-          if grep -rn '\${[a-zA-Z_]*\^\^}' lib/ skills/ install.sh 2>/dev/null; then
+          if git grep -n '\${[a-zA-Z_]*\^\^}' HEAD -- lib skills install.sh; then
             echo 'FAIL: Found bash 4+ only ${var^^} syntax'
             FOUND=1
           else
@@ -62,7 +69,7 @@ jobs:
           fi
 
           # Check for associative arrays (declare -A)
-          if grep -rn 'declare -A' lib/ skills/ install.sh 2>/dev/null; then
+          if git grep -n 'declare -A' HEAD -- lib skills install.sh; then
             echo 'FAIL: Found bash 4+ only associative arrays'
             FOUND=1
           else
