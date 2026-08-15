@@ -21,6 +21,7 @@ Check the status of ANY background task launched by `execute_long_running_task`.
 ~/.openclaw/skills/long-running-task/bin/check_task --all
 
 # JSON output (for programmatic use — includes system memory info)
+# Output shape: {"tasks": [{...}, ...], "system": {...}}  — task array is wrapped under "tasks"
 ~/.openclaw/skills/long-running-task/bin/check_task --all --json
 
 # Custom stall threshold (default 600s = 10 min)

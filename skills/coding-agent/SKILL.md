@@ -1,12 +1,12 @@
 ---
 name: coding-agent
-description: Run coding agents (Claude Code, Codex, Gemini, OpenCode, Pi) via background process for programmatic control. These agents excel at investigating codebases, analyzing systems, writing documentation, and executing multi-step workflows.
+description: Use when delegating a coding task to a CLI coding agent (Claude Code, Codex, Gemini, OpenCode, Pi) — investigations, multi-step refactors, parallel issue work, PR reviews. Direct mode for quick (<5 min) tasks; pair with long-running-task for background execution >5 min.
 metadata: {"openclaw":{"emoji":"🧩","requires":{"anyBins":["claude","codex","opencode","pi"]}}}
 ---
 
 # Coding Agent
 
-Use **bash** (with optional background mode) to launch coding agents. Simple and effective.
+Launch coding agents headlessly (`-p` / `exec`) for programmatic control. For tasks expected to run >5 min, route through `long-running-task` for manifests, watchdogs, and channel-aware notifications.
 
 ## Use Cases
 
@@ -186,38 +186,18 @@ The billing mode can also be overridden per-invocation with `OPENCLAW_UNSET_ANTH
 
 ---
 
-## PTY Mode
+## Headless vs Interactive Modes
 
-Coding agents are **interactive terminal applications** that need a pseudo-terminal (PTY) to work correctly.
+Coding agents have **two execution modes** — pick by context, not by reflex:
 
-```bash
-# Correct - with PTY
-bash pty:true command:"codex exec 'Your prompt'"
+| Mode | When | Examples |
+|------|------|----------|
+| **Headless** (no PTY) | Programmatic invocation, scripts, background tasks, `execute_long_running_task` | `claude -p`, `codex exec`, `gemini -p`, `opencode run` |
+| **Interactive** (PTY required) | Live REPL-style sessions, TUI mode | `claude` (no `-p`), `codex` (no `exec`), `gemini`, `opencode` |
 
-# Wrong - no PTY, agent may break
-bash command:"codex exec 'Your prompt'"
-```
+Headless mode reads from stdin/argv, writes plain (or JSON) to stdout, and exits cleanly — no terminal needed. **Allocating a PTY for headless invocations is unnecessary and can break stream-json output parsing.**
 
-### Bash Tool Parameters
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `command` | string | The shell command to run |
-| `pty` | boolean | Allocates a pseudo-terminal for interactive CLIs |
-| `workdir` | string | Working directory for the agent |
-| `background` | boolean | Run in background, returns sessionId for monitoring |
-| `timeout` | number | Timeout in seconds |
-
-### Process Tool Actions (for background sessions)
-
-| Action | Description |
-|--------|-------------|
-| `list` | List all running/recent sessions |
-| `poll` | Check if session is still running |
-| `log` | Get session output |
-| `write` | Send raw data to stdin |
-| `submit` | Send data + newline |
-| `kill` | Terminate the session |
+If you are using OpenClaw's bash tool and explicitly want an interactive session, pass `pty:true`. For headless invocations from any shell or runner, omit the PTY.
 
 ---
 
@@ -254,23 +234,23 @@ git worktree remove /tmp/issue-99
 REVIEW_DIR=$(mktemp -d)
 git clone <repo-url> $REVIEW_DIR
 cd $REVIEW_DIR && gh pr checkout 42
-bash pty:true workdir:$REVIEW_DIR command:"codex review --base origin/main"
+codex review --base origin/main
 
 # Or use git worktree
 git worktree add /tmp/pr-42-review pr-42-branch
-bash pty:true workdir:/tmp/pr-42-review command:"codex review --base main"
+( cd /tmp/pr-42-review && codex review --base main )
 ```
 
 ---
 
 ## tmux Orchestration (Alternative)
 
-For advanced multi-agent control, use tmux instead of bash background mode.
+For advanced multi-agent control with live attach/detach, use tmux instead of background mode.
 
 | Use Case | Recommended |
 |----------|-------------|
-| Quick one-shot tasks | `bash pty:true` |
-| Long-running with monitoring | `bash background:true` |
+| Quick one-shot tasks | direct headless invocation (`claude -p`, `codex exec`) |
+| Long-running with monitoring | `execute_long_running_task --mode heartbeat` |
 | Multiple parallel agents | **tmux** |
 | Session persistence | **tmux** |
 
@@ -301,7 +281,7 @@ By default, agents launched via `execute_long_running_task` run with **full perm
 
 | `--permission-mode` | Claude Code | Codex CLI | Gemini CLI |
 |---------------------|-------------|-----------|------------|
-| `bypassPermissions` (default) | `--dangerously-skip-permissions` | `-s danger-full-access --yolo` | `-y` (yolo) |
+| `bypassPermissions` (default) | `--dangerously-skip-permissions` | `-s danger-full-access --dangerously-bypass-approvals-and-sandbox` | `-y` (yolo) |
 | `acceptEdits` | `--permission-mode acceptEdits` | `--full-auto` | `--approval-mode auto_edit` |
 
 ### When to use each mode
@@ -346,13 +326,14 @@ execute_long_running_task --type coding-agent --agent claude --command "..." \
 
 ## Best Practices
 
-1. **Always use pty:true** — coding agents need a terminal
+1. **Use headless mode for programmatic invocations** — `-p` / `exec`. Reserve PTY for live interactive sessions only.
 2. **Use `--workdir`** — keeps agent focused on the target project, prevents reading unrelated files
 3. **Default to `bypassPermissions`** — only use `acceptEdits` when the user explicitly requests sandboxed/restricted execution
 4. **Use worktrees for parallel agents** — prevents file conflicts between concurrent agents
 5. **Never review PRs in your main working directory** — use temp dirs or worktrees
 6. **Use `check_task` to monitor background agents** — the manifest system provides richer analysis than raw logs
 7. **Let `execute_long_running_task` handle flags** — don't assemble `--dangerously-skip-permissions`, `--output-format stream-json`, etc. manually
+8. **Pass `--target` / `--channel` / `--session-id` from `SESSION_CONTEXT.md`** — so completion notifications route back to the chat that launched the task
 
 ---
 

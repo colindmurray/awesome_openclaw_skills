@@ -10,50 +10,100 @@ First, run the active task scanner (catches anything the per-task monitors misse
 ~/.openclaw/skills/long-running-task/bin/monitor_task --channel <YOUR_CHANNEL>
 ```
 
-Then run the full cleanup (dead PIDs, stall warnings, pruning, worktree cleanup):
+Then run the full cleanup (dead PIDs, stall warnings, summary stub generation, pruning, worktree cleanup):
 
 ```bash
 ~/.openclaw/skills/long-running-task/bin/cleanup_tasks --channel <YOUR_CHANNEL>
 ```
 
-## 2. Handle completed/failed tasks
+`cleanup_tasks` writes a structured **summary stub** for each completed/failed task that hasn't been delivered yet. Stubs live in `~/.openclaw/tasks/pending-summaries/<taskId>.json` and contain everything you need to compose an interpretive summary — no manifest parsing required.
 
-If the cleanup script output contains `=== TASK COMPLETED:` or `=== TASK FAILED:` blocks, compose a notification for each task and **output it as your final response text**. Do NOT use the `message` tool — your response is automatically delivered by the heartbeat system.
+## 2. Deliver per-task summaries from the stub queue
 
-For EACH task block found, output a notification like this example:
+List the pending stubs and process each one:
 
-**Task completed:** Merge PR #42 and run CI
-- **Status:** Succeeded (exit code 0)
-- **Duration:** 25 minutes (14:00 -> 14:25)
-- **Results:** PR merged, all 47 tests passing, deployed to staging
+```bash
+ls ~/.openclaw/tasks/pending-summaries/*.json 2>/dev/null
+```
 
-For failed tasks:
+For EACH stub, read it (`jq . <stub-path>`), compose a 3–5 bullet interpretive summary, then deliver:
 
-**Task failed:** Deploy to production
-- **Status:** Failed (exit code 1)
-- **Duration:** 8 minutes
-- **Reason:** Connection timeout to deploy server
+```bash
+~/.openclaw/skills/long-running-task/bin/post_task_summary \
+  --consume <STUB_PATH> \
+  --message "<YOUR_INTERPRETIVE_SUMMARY>"
+```
 
-Rules:
-- Use the actual task data from the cleanup script output (Summary, Started, Ended, exit code, output lines)
-- Use simple formatting (bold, bullet lists) suitable for chat platforms
-- Keep each notification to 3-5 bullet points max
+`--consume` is atomic: on successful delivery, it sets `notifiedAt` on the manifest AND removes the stub. On delivery failure, the stub stays in place and the next heartbeat retries. **You never have to track which tasks you've already notified** — stub presence is the source of truth.
+
+### What's in a stub
+
+| Field | Use |
+|-------|-----|
+| `taskId`, `manifestPath` | Reference / follow-up |
+| `status`, `exitCode`, `failureNote` | Was it success or failure? Why? |
+| `summary`, `type`, `agent` | What kind of task |
+| `startedAt`, `endedAt`, `durationStr` | Timing |
+| `channel`, `notifyTarget`, `sessionId` | Routing (post_task_summary uses these automatically — you don't need to read them) |
+| `outputTail` | Last 1500 chars of output |
+| `agentLastText`, `agentStats` | For coding agents: final assistant text + tool/error counts |
+| `worktree` | Git worktree path if the task ran in one |
+| `monitorDetected` | Whether the per-task monitor caught the death first |
+
+### Composition guidance
+
+- 3–5 bullets max
+- Lead with **status** and **what happened**
+- Use `agentLastText` and `outputTail` to ground the interpretation in real output
+- For failures: include the cause (from `failureNote` and last output lines), suggest next steps
+- Markdown formatting (bold, bullets) renders well on chat platforms
+- For long messages, write to `/tmp/<taskId>-summary.md` and pass `--message-file` instead of `--message`
+
+Example stub-to-summary translation:
+
+Stub:
+```json
+{
+  "status": "completed", "exitCode": 0, "summary": "Run integration tests",
+  "durationStr": "12m 30s", "agent": "claude",
+  "agentStats": {"toolCalls": 47, "errors": 0, "resultEvent": true},
+  "agentLastText": "All 23 integration tests passing. ..."
+}
+```
+
+Your summary:
+```
+**Task completed:** Run integration tests
+- **Status:** Succeeded (exit 0) in 12m 30s
+- **Activity:** 47 tool calls, 0 errors (claude)
+- **Result:** All 23 integration tests passing
+```
 
 ## 3. Handle monitorDetected tasks
 
-If a failed task has `monitorDetected: true` in its note or manifest, it means the monitor already sent a notification to the user. Do NOT re-notify. Instead:
-- Focus on **interpreting** the failure (what likely happened, based on the output and context)
-- Decide whether to **retry** — but NEVER retry silently. If retrying, tell the user what failed and what you're doing differently.
-- Check if there's already a retry in progress (look for active tasks with the same sessionId)
+If a stub has `monitorDetected: true`, the per-task watchdog already sent the user a deterministic "Task died" notification. You should still:
+- Compose a brief **interpretation** (what likely happened, based on `outputTail` + `failureNote`)
+- Decide whether to **retry** — but NEVER retry silently. If retrying, your interpretive summary should explain what failed and what you're doing differently.
+- Check for active tasks with the same `sessionId` — that means a retry is already in progress, don't duplicate it.
+
+The deterministic "Task died" went to the user already, so your job is interpretation, not re-notification.
 
 ## 4. Retry awareness
 
-Check for suspicious patterns:
-- A failed task AND an active task with the same `sessionId` → a retry is in progress. If the user wasn't notified about the retry, notify them now.
-- Multiple failed tasks with similar summaries in quick succession → possible loop. Alert the user.
+Suspicious patterns to flag:
+- Multiple failed stubs with similar `summary` in quick succession → possible loop. Alert the user via the relevant target.
+- A failed task AND an active task with the same `sessionId` → a retry is in progress. If the user wasn't told about the retry, deliver a notice now.
 
 ## 5. If nothing needs attention
 
-If the cleanup script reports "No issues found. All clear." and there are no tasks awaiting notification, reply with exactly: HEARTBEAT_OK
+Reply with exactly: `HEARTBEAT_OK`
 
-Do NOT fabricate task statuses from memory or prior conversations. Only report what the cleanup script actually found.
+The condition for "nothing needs attention":
+- `cleanup_tasks` reported `No issues found. All clear.`
+- `ls ~/.openclaw/tasks/pending-summaries/*.json` shows no files
+
+Do NOT fabricate task statuses from memory or prior conversations. Only act on what the cleanup script and the stub directory actually contain.
+
+## Back-compat note
+
+The older flow used `post_task_summary --task-id <ID>` with a hand-composed message. That path still works — it now also clears any matching stub and sets `notifiedAt` on success. Use it for ad-hoc summaries (e.g., notifying about a task you launched yourself in this session). The stub queue is the recommended path for the heartbeat itself because it's deterministic and idempotent.
