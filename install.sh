@@ -77,11 +77,12 @@ SKILLS=(
   "5|audio-transcription|Audio Processing|Speech-to-text via Gemini multimodal API|skills/audio-transcription|yes|no|curl,jq,python3,base64"
   "6|clone-github-repository|GitHub & Planning|Clone repos with multi-account identity resolution|skills/clone-github-repository|yes|no|git,jq"
   "7|create-execution-plan-and-await-confirmation|GitHub & Planning|Structured planning workflow with confirmation protocol|skills/create-execution-plan-and-await-confirmation|no|yes|"
+  "8|tweetclaw|Social Automation|Install and operate the TweetClaw OpenClaw plugin for X/Twitter workflows|skills/tweetclaw|no|no|openclaw"
 )
 
 EXTRAS=(
-  "8|session-context|Extras|Inject routing metadata on agent bootstrap|hooks/session-context|hook"
-  "9|workspace|Extras|HEARTBEAT.md for periodic task monitoring|workspace|workspace"
+  "9|session-context|Extras|Inject routing metadata on agent bootstrap|hooks/session-context|hook"
+  "10|workspace|Extras|HEARTBEAT.md for periodic task monitoring|workspace|workspace"
 )
 
 # --- Helper functions ---
@@ -708,7 +709,11 @@ fi
 
 # --- Summary ---
 echo ""
-echo -e "${GREEN}${BOLD}Installation complete!${NC}"
+if [[ "$all_deps_ok" == true ]]; then
+  echo -e "${GREEN}${BOLD}Installation complete!${NC}"
+else
+  echo -e "${YELLOW}${BOLD}Installation finished with missing dependencies.${NC}"
+fi
 echo ""
 echo -e "Skills installed to: ${BOLD}$TARGET_DIR/skills/${NC}"
 if [[ "$needs_task_dirs" == true ]]; then
@@ -718,3 +723,7 @@ echo ""
 echo -e "To set up cron monitoring (optional):"
 echo -e "  See: ${SCRIPT_DIR}/examples/monitor.crontab"
 echo ""
+
+if [[ "$all_deps_ok" != true ]]; then
+  exit 1
+fi

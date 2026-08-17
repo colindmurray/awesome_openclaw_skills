@@ -27,6 +27,7 @@ The interactive installer lets you pick which skills to install. Use `--all` to 
 | **audio-transcription** | Audio Processing | Speech-to-text via Gemini multimodal API (supports OGG, MP3, WAV, FLAC, M4A, WEBM) |
 | **clone-github-repository** | GitHub & Planning | Clone repos with automatic N-account identity resolution via config file |
 | **create-execution-plan** | GitHub & Planning | Structured planning workflow with confirmation protocol and delegation patterns |
+| **tweetclaw** | Social Automation | Install and operate the TweetClaw OpenClaw plugin for X/Twitter search, posting, media, monitors, webhooks, and giveaway draws |
 
 ### Extras
 
@@ -132,6 +133,8 @@ awesome_openclaw_skills/
 │   │   ├── SKILL.md
 │   │   └── bin/
 │   │       └── clone_github_repository
+│   ├── tweetclaw/
+│   │   └── SKILL.md
 │   └── create-execution-plan-and-await-confirmation/
 │       ├── SKILL.md
 │       └── references/
@@ -173,7 +176,10 @@ TARGET_DIR defaults to ~/.openclaw
 |-------|----------|
 | long-running-task, check-on-task, clone-github-repository | `jq` |
 | audio-summary, audio-transcription | `curl`, `jq`, `python3`, `base64` |
+| tweetclaw | `openclaw` |
 | All skills | `bash` 4.0+ |
+
+Xquik is an independent third-party service. Not affiliated with X Corp. "Twitter" and "X" are trademarks of X Corp.
 
 ## Contributing
 
