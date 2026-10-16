@@ -1,10 +1,8 @@
 name: Cross-Platform Tests
 
+# Test locally while iterating; request CI explicitly for a substantial PR.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   test:
